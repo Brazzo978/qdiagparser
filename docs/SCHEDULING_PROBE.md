@@ -71,16 +71,19 @@ These log IDs are present in the local Qualcomm/QXDM golden logmask and are more
 - LTE `0xB132`: PDCCH decoding result candidate.
 - LTE `0xB139`: PUSCH TX report candidate.
 - LTE `0xB13C`: PUCCH TX report candidate.
-- LTE `0xB140`: PUSCH CSF report candidate.
-- LTE `0xB144`: PDSCH stat indication candidate.
+- LTE `0xB140`: SRS TX report candidate in open masks.
+- LTE `0xB144`: RACH TX report candidate in open masks.
+- LTE `0xB14D`: PUCCH CSF report candidate.
+- LTE `0xB14E`: PUSCH CSF report candidate.
 - LTE `0xB16B`: PDCCH/PHICH indication candidate.
 - LTE `0xB16D`: GM TX report candidate.
 - LTE `0xB173`: PDSCH stat indication candidate.
 - LTE `0xB174`: PUSCH stat indication candidate.
-- LTE `0xB175`: PUCCH CSF report candidate.
-- LTE `0xB176`: CQI report candidate.
-- LTE `0xB177`: RI report candidate.
-- LTE `0xB178`: PMI report candidate.
+- LTE `0xB175`..`0xB178`: legacy/raw candidates kept for vendor-mask drift.
+- NR `0xB881`: NR MAC UL TB stats candidate.
+- NR `0xB883`: NR MAC UL physical channel schedule candidate.
+- NR `0xB888`: NR MAC PDSCH stats candidate.
+- NR `0xB975`: NR ML1 serving-cell beam-management candidate.
 
 ## Live PHY Probe On T99W175
 
@@ -126,14 +129,15 @@ Low-yield in this run:
 
 - `0xB144`: 2 idle, 2 load.
 - `0xB177`: 2 idle, 2 load.
-- `0xB140`, `0xB174`, `0xB175`, `0xB176`, `0xB178`: no events seen in this T99W175 run.
+- `0xB140`, `0xB174`, `0xB175`, `0xB176`, `0xB178`: no events seen in this T99W175 run. Newer builds also probe `0xB14D`/`0xB14E` for LTE CSF and NR `0xB881`/`0xB883`/`0xB888`/`0xB975`.
 
 Confirmed partial mapping:
 
 - `0xB139` is structured as an 8-byte header plus 100-byte records.
 - In each `0xB139` record, offset `+0` is a TTI counter compatible with `SFN * 10 + subframe`.
-- In each `0xB139` record, offset `+8` matches the decoded LTE MAC UL `grant` field. In the load capture it matched 153 out of 165 exact TTI-correlated records.
-- `0xB139` is now emitted as `lte_phy_pusch_tx_candidate` with `tti`, `sfn_guess`, `subframe_guess`, `grant`, and raw offset fields.
+- `0xB139` now decodes v102/v144 plus the T99W175-observed v161 100-byte layout.
+- In each `0xB139` record, offset `+8` is exposed as `tb_size` and backward-compatible `grant`; it matched the decoded LTE MAC UL `grant` field in 153 out of 165 exact TTI-correlated records in the first load capture.
+- `0xB139` is now emitted as `lte_phy_pusch_tx_candidate` with TTI, carrier, RB start/count, TBS, coding rate, PUSCH modulation order, ACK/CQI/RI flags, RV/re-tx, and TX-power candidate. UL MCS is still not explicit in this layout.
 
 Structured decoder smoke:
 
@@ -145,7 +149,8 @@ Structured decoder smoke:
 Promising but not confirmed:
 
 - `0xB130` is structured as a 4-byte header plus 32-byte records and looks like a PDCCH/DCI family, but it does not correlate one-to-one with decoded DL MAC transport blocks.
-- `0xB173` is structured as a 4-byte header plus 40-byte records. Record offset `+16` often has LTE-MCS-like values such as `7`, `15`, `18`, and `26`, but exact DL MAC correlation is not proven yet.
+- `0xB173` v36 is structured as a 4-byte header plus 40-byte records and now decodes DL MCS, RB, modulation, HARQ/RV/NDI/CRC, and rolling DL BLER from the MobileInsight layout.
+- Non-v36 `0xB173` records remain `candidate_unconfirmed`; record offset `+16` can look MCS-like but must not be displayed as real MCS.
 - `0xB132` carries similar candidate values and scales under load; it needs a separate controlled downlink capture before exposing an MCS field.
 
 ## Live Probe On T99W175
@@ -210,11 +215,13 @@ Therefore the honest minimum functional GUI should show:
 
 - Full signal metrics already decoded.
 - LTE MAC traffic activity with TBS/grant/HARQ/CC.
-- MCS/RB/modulation/CQI/RI/PMI as explicit `not_decoded` placeholders.
+- DL MCS/RB/modulation/BLER when `0xB173` arrives as v36; otherwise explicit placeholders.
+- UL RB/TBS/modulation and TX-power candidate from `0xB139`; UL MCS remains a placeholder until DCI/grant correlation is decoded.
+- CQI/RI/PMI as explicit placeholders until `0xB14D`/`0xB14E` CSF bitfields are validated on this modem.
 
 ## Next Search Direction
 
-The missing fields likely require a different Qualcomm log family not present in SCAT's decoded Qualcomm LTE/NR parser:
+The remaining missing fields likely require a different Qualcomm log family not present in SCAT's decoded Qualcomm LTE/NR parser:
 
 - LTE/NR PDSCH decode or scheduling report.
 - LTE/NR PUSCH Tx report.

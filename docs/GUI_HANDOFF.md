@@ -91,7 +91,7 @@ The snapshot is intentionally compact and GUI-ready:
   },
   "missing_metrics": {
     "lte": {
-      "dl_mcs": {"value": null, "status": "not_decoded", "source_candidates": ["LTE 0xB130/0xB132/0xB144/0xB173"]}
+      "dl_mcs": {"value": null, "status": "not_decoded", "source_candidates": ["LTE 0xB173 v36"]}
     },
     "nr": {
       "dl_mcs": {"value": null, "status": "not_decoded", "source_candidates": ["NR MAC/PHY scheduling logs"]}
@@ -152,7 +152,7 @@ For parser development only, probe extra scheduling candidates:
 
 These are not guaranteed to contain MCS/RB/modulation. They are a safe next probe set found from SCAT/Qualcomm log names.
 
-`--probe-phy` is the next, more targeted search mode. It enables LTE PHY candidate logs from the local Qualcomm/QXDM golden logmask: `0xB126`, `0xB130`, `0xB132`, `0xB139`, `0xB13C`, `0xB140`, `0xB144`, `0xB16B`, `0xB16D`, `0xB173`, `0xB174`, `0xB175`, `0xB176`, `0xB177`, and `0xB178`. Treat all output as raw evidence until a field offset is proven under load.
+`--probe-phy` is the next, more targeted search mode. It enables LTE PHY candidate logs from the local Qualcomm/QXDM golden logmask: `0xB126`, `0xB130`, `0xB132`, `0xB139`, `0xB13C`, `0xB140`, `0xB144`, `0xB14D`, `0xB14E`, `0xB16B`, `0xB16D`, `0xB173`, `0xB174`, and legacy raw candidates `0xB175`..`0xB178`. It also probes NR candidates `0xB881`, `0xB883`, `0xB888`, and `0xB975`. Treat output as raw evidence unless the event reports a decoded confidence.
 
 Keep `--probe-phy` out of the normal page refresh path. It should be exposed only as an explicit debug capture button because it produces many more events and can raise CPU load.
 
@@ -200,8 +200,8 @@ Important nested keys:
 - `lte.per_antenna[]`: latest LTE per-RX metrics keyed internally by `earfcn + pci + cell_index`.
 - `lte.mac.dl_by_cc[]`: latest decoded LTE DL transport block per component carrier.
 - `lte.mac.ul_by_cc[]`: latest decoded LTE UL transport block per component carrier.
-- `lte.phy.pusch_tx_candidate`: latest `0xB139` PUSCH candidate, with timing/grant confidence only.
-- `lte.phy.pdsch_stat_candidate`: latest `0xB173` PDSCH-stat candidate, raw/unconfirmed.
+- `lte.phy.pusch_tx_candidate`: latest `0xB139` PUSCH TX report, decoded for v102/v144/v161.
+- `lte.phy.pdsch_stat_candidate`: latest `0xB173` PDSCH-stat report; v36 is decoded, other versions remain candidate/unconfirmed.
 - `lte.ca.observed_cc_ids[]`: component carriers observed from MAC activity, already normalized for 2CA/3CA/4CA views.
 - `nr.serving_cell`: latest NR serving cell info when emitted by the modem.
 - `nr.layers[]`: latest NR ML1 layer/cell/beam metrics decoded from `0xB97F`.
@@ -249,26 +249,34 @@ These fields are not yet the final MCS/RB/modulation display. Treat them as the 
 
 Source: LTE `0xB139`, only when `--probe-phy` is enabled.
 
-Use for parser/debug views, not final user KPI tiles yet:
+Use for UL scheduling/debug cards:
 
-- `tti`, `sfn_guess`, `subframe_guess`
-- `grant`, confirmed to match LTE MAC UL `grant` on exact TTI in the T99W175 load capture
-- `tx_power_raw`, `field_10_raw`, `field_34_raw`, `field_36_raw`, `field_40_raw`, `field_42_raw`, `field_46_raw`
+- `tti`, `sfn_guess`, `subframe_guess`, `carrier_id`
+- `rb_start_slot0`, `rb_start_slot1`, `rb_count`
+- `tb_size`, `grant`, `coding_rate`, `pusch_mod_order`, `pusch_modulation`
+- `ack_flag`, `cqi_flag`, `ri_flag`, `rv`, `retx_index`
+- `tx_power_raw`, `tx_power_dbm_candidate`
 - `record_hex`
 
-Only `grant` and timing are mapped with confidence. Keep the other fields in a collapsible debug/details view until more captures prove the offsets.
+The runtime supports MobileInsight-style v102/v144 and the T99W175-observed v161 100-byte layout. UL MCS is still not explicit in this log; use `tb_size`/RB/modulation and later correlate with DCI/UL grant logs for a true MCS value.
 
 ### `lte_phy_pdsch_stat_candidate`
 
 Source: LTE `0xB173`, only when `--probe-phy` is enabled.
 
-Use for parser/debug views only:
+Use for DL scheduling cards when `confidence == "layout_v36_decoded"`:
 
-- `mcs_candidate_raw`, from record offset `+16`
-- `tti_guess`, `field_0_raw`, `field_2_raw`, `field_4_raw`, `field_8_raw`, `field_12_raw`, `field_16_raw`, `field_18_raw`, `field_20_raw`, `field_24_raw`, `field_28_raw`
+- `sfn`, `subframe`, `serving_cell_id`
+- `num_rbs`, `num_layers`, `num_transport_blocks`
+- `transport_blocks[]`: `harq_id`, `rv`, `ndi`, `crc_result`, `tb_size`, `mcs`, `num_rbs`, `modulation_type`, `modulation`
+- `crc_pass_total`, `crc_fail_total`, `dl_bler`
+
+For versions other than v36, render it as debug-only candidate data:
+
+- `mcs_candidate_raw`, raw fields, `record_hex`
 - `confidence: "candidate_unconfirmed"`
 
-Do not display this as real MCS yet. Live probes showed the log is active, but current `mcs_candidate_raw` values can exceed the LTE MCS range, so the offset or record interpretation is still unproven.
+Do not display `mcs_candidate_raw` as real MCS. Only `transport_blocks[].mcs` from `confidence:"layout_v36_decoded"` should be treated as decoded DL MCS.
 
 ### `measurement_database_update`
 
@@ -338,6 +346,7 @@ Validated on T99W175:
 - Forced Hetzner download through `enx00e04c6802a5` produced LTE MAC DL/UL events.
 - QLTE and QNR combo payloads were captured as `b0cd_qlte.hex` and `b826_qnr.hex`.
 - `--probe-scheduling` was tested; it produced measurement/search/RACH candidates, not confirmed MCS/RB/modulation.
-- `--probe-phy` found active LTE PHY candidates. `0xB139` now has a partial decoder for PUSCH TX timing and UL grant.
+- `--probe-phy` found active LTE PHY candidates. `0xB139` now decodes PUSCH timing, RB start/count, TBS, coding rate, modulation order, RV/re-tx flags, CQI/RI flags, and a TX-power candidate for v102/v144/v161 layouts.
+- `0xB173` v36 now decodes DL MCS/RB/modulation/CRC and rolling DL BLER; versions seen as non-v36 stay `candidate_unconfirmed`.
 
 Validated event examples are in `docs/gui-state.example.json`.

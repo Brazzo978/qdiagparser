@@ -59,16 +59,18 @@ extern int diag_disable_console;
 #define LOG_LTE_PHY_PDCCH_DECODING_RESULT2 0xB132
 #define LOG_LTE_PHY_PUSCH_TX_REPORT 0xB139
 #define LOG_LTE_PHY_PUCCH_TX_REPORT 0xB13C
-#define LOG_LTE_PHY_PUSCH_CSF_REPORT 0xB140
-#define LOG_LTE_PHY_PDSCH_STAT_INDICATION 0xB144
+#define LOG_LTE_PHY_SRS_TX_REPORT 0xB140
+#define LOG_LTE_PHY_RACH_TX_REPORT 0xB144
+#define LOG_LTE_PHY_PUCCH_CSF_REPORT 0xB14D
+#define LOG_LTE_PHY_PUSCH_CSF_REPORT 0xB14E
 #define LOG_LTE_PHY_PDCCH_PHICH_INDICATION 0xB16B
 #define LOG_LTE_PHY_GM_TX_REPORT 0xB16D
 #define LOG_LTE_PHY_PDSCH_STAT_INDICATION2 0xB173
 #define LOG_LTE_PHY_PUSCH_STAT_INDICATION 0xB174
-#define LOG_LTE_PHY_PUCCH_CSF_REPORT 0xB175
-#define LOG_LTE_PHY_CQI_REPORT 0xB176
-#define LOG_LTE_PHY_RI_REPORT 0xB177
-#define LOG_LTE_PHY_PMI_REPORT 0xB178
+#define LOG_LTE_PHY_LEGACY_B175 0xB175
+#define LOG_LTE_PHY_LEGACY_B176 0xB176
+#define LOG_LTE_PHY_LEGACY_B177 0xB177
+#define LOG_LTE_PHY_LEGACY_B178 0xB178
 #define LOG_LTE_RRC_OTA 0xB0C0
 #define LOG_LTE_RRC_MIB 0xB0C1
 #define LOG_LTE_RRC_SCELL 0xB0C2
@@ -81,7 +83,11 @@ extern int diag_disable_console;
 #define LOG_NR_RRC_SCELL 0xB823
 #define LOG_NR_RRC_CFG 0xB825
 #define LOG_NR_CA 0xB826
+#define LOG_NR_MAC_UL_TB_STATS 0xB881
+#define LOG_NR_MAC_UL_PHYS_CH_SCHED 0xB883
+#define LOG_NR_MAC_PDSCH_STATS 0xB888
 #define LOG_NR_MAC_RACH_ATTEMPT 0xB88A
+#define LOG_NR_ML1_SERVING_CELL_BEAM_MGMT 0xB975
 #define LOG_NR_ML1 0xB97F
 
 static volatile sig_atomic_t running = 1;
@@ -226,29 +232,77 @@ typedef struct {
 
 typedef struct {
     int valid;
+    uint8_t version;
+    uint16_t serving_cell_id;
+    uint16_t header_word;
+    uint16_t dispatch_sfn;
+    uint8_t dispatch_subframe;
+    uint16_t record_index;
+    uint16_t record_count;
+    uint16_t sfn;
+    uint8_t subframe;
     uint16_t tti;
-    uint16_t sfn_guess;
-    uint8_t subframe_guess;
+    uint8_t carrier_id;
+    uint8_t ack_flag;
+    uint8_t cqi_flag;
+    uint8_t ri_flag;
+    uint8_t frequency_hopping;
+    uint8_t retx_index;
+    uint8_t rv;
+    uint8_t mirror_hopping;
+    uint8_t ra_type;
+    uint16_t rb_start_slot0;
+    uint16_t rb_start_slot1;
+    uint16_t rb_count;
+    uint16_t tb_size;
     uint16_t grant;
-    int16_t tx_power_raw;
-    uint16_t field_10_raw;
-    uint16_t field_34_raw;
-    uint16_t field_36_raw;
-    uint16_t field_40_raw;
-    uint16_t field_42_raw;
-    uint16_t field_46_raw;
+    uint16_t coding_rate_raw;
+    double coding_rate;
+    uint8_t pusch_mod_order;
+    uint32_t mod_gain_cluster_raw;
+    uint32_t tx_cqi_raw;
+    uint8_t tx_power_raw;
+    int16_t tx_power_dbm_candidate;
     uint64_t qts;
     time_t updated_at;
 } lte_phy_pusch_t;
 
 typedef struct {
     int valid;
+    uint8_t tb_index;
+    uint8_t harq_id;
+    uint8_t rv;
+    uint8_t ndi;
+    uint8_t crc_result;
+    uint8_t rnti_type;
+    uint8_t discarded_retx_present;
+    uint8_t did_recombining;
+    uint16_t tb_size;
+    uint8_t mcs;
+    uint8_t num_rbs;
+    uint8_t modulation_type;
+    uint8_t qed2_interim;
+} lte_phy_pdsch_tb_t;
+
+typedef struct {
+    int valid;
+    int decoded;
     uint8_t version;
     uint8_t subversion;
     uint16_t header_word;
     uint16_t record_index;
     uint16_t record_count;
-    uint16_t tti_guess;
+    uint16_t sfn;
+    uint8_t subframe;
+    uint8_t num_rbs;
+    uint8_t num_layers;
+    uint8_t num_transport_blocks;
+    uint8_t serving_cell_id;
+    uint8_t hsic_enabled;
+    lte_phy_pdsch_tb_t tb[2];
+    unsigned long long crc_pass_total;
+    unsigned long long crc_fail_total;
+    double dl_bler;
     uint8_t mcs_candidate_raw;
     uint16_t field_0_raw;
     uint16_t field_2_raw;
@@ -360,18 +414,20 @@ typedef struct {
 
 static snapshot_state_t state;
 static log_count_t log_counts[MAX_LOG_COUNTS];
+static unsigned long long lte_pdsch_crc_pass_total = 0;
+static unsigned long long lte_pdsch_crc_fail_total = 0;
 
 static const missing_metric_t lte_missing_metrics[] = {
-    {"dl_mcs", "LTE 0xB130/0xB132/0xB144/0xB173"},
+    {"dl_mcs", "LTE 0xB173 v36"},
     {"ul_mcs", "LTE 0xB139/0xB174"},
-    {"dl_modulation", "LTE 0xB130/0xB132/0xB144/0xB173"},
+    {"dl_modulation", "LTE 0xB173 v36"},
     {"ul_modulation", "LTE 0xB139/0xB174"},
-    {"dl_rb_alloc", "LTE 0xB126/0xB130/0xB132"},
+    {"dl_rb_alloc", "LTE 0xB173 v36"},
     {"ul_rb_alloc", "LTE 0xB139/0xB174"},
-    {"cqi", "LTE 0xB140/0xB175/0xB176"},
-    {"ri", "LTE 0xB177"},
-    {"pmi", "LTE 0xB178"},
-    {"bler", "LTE 0xB144/0xB173"},
+    {"cqi", "LTE 0xB14D/0xB14E"},
+    {"ri", "LTE 0xB14D/0xB14E"},
+    {"pmi", "LTE 0xB14D/0xB14E"},
+    {"bler", "LTE 0xB173 v36"},
     {"tx_power_dbm", "LTE 0xB139/0xB16D/0xB174"}
 };
 
@@ -416,6 +472,16 @@ static double q7_signed(uint32_t raw) {
     uint32_t integer = (raw >> 7) & 0xff;
     uint32_t frac = raw & 0x7f;
     return -1.0 * (double)((integer ^ 0xff) + 1) + (double)frac * 0.0078125;
+}
+
+static const char *lte_modulation_name(uint8_t order) {
+    switch (order) {
+        case 2: return "QPSK";
+        case 4: return "16QAM";
+        case 6: return "64QAM";
+        case 8: return "256QAM";
+        default: return "unknown";
+    }
 }
 
 static uint64_t monotonic_ms(void) {
@@ -527,16 +593,18 @@ static const char *log_name(uint16_t log_id) {
         case LOG_LTE_PHY_PDCCH_DECODING_RESULT2: return "lte_phy_pdcch_decoding_result2_candidate";
         case LOG_LTE_PHY_PUSCH_TX_REPORT: return "lte_phy_pusch_tx_report_candidate";
         case LOG_LTE_PHY_PUCCH_TX_REPORT: return "lte_phy_pucch_tx_report_candidate";
+        case LOG_LTE_PHY_SRS_TX_REPORT: return "lte_phy_srs_tx_report_candidate";
+        case LOG_LTE_PHY_RACH_TX_REPORT: return "lte_phy_rach_tx_report_candidate";
+        case LOG_LTE_PHY_PUCCH_CSF_REPORT: return "lte_phy_pucch_csf_report_candidate";
         case LOG_LTE_PHY_PUSCH_CSF_REPORT: return "lte_phy_pusch_csf_report_candidate";
-        case LOG_LTE_PHY_PDSCH_STAT_INDICATION: return "lte_phy_pdsch_stat_indication_candidate";
         case LOG_LTE_PHY_PDCCH_PHICH_INDICATION: return "lte_phy_pdcch_phich_indication_candidate";
         case LOG_LTE_PHY_GM_TX_REPORT: return "lte_phy_gm_tx_report_candidate";
         case LOG_LTE_PHY_PDSCH_STAT_INDICATION2: return "lte_phy_pdsch_stat_indication2_candidate";
         case LOG_LTE_PHY_PUSCH_STAT_INDICATION: return "lte_phy_pusch_stat_indication_candidate";
-        case LOG_LTE_PHY_PUCCH_CSF_REPORT: return "lte_phy_pucch_csf_report_candidate";
-        case LOG_LTE_PHY_CQI_REPORT: return "lte_phy_cqi_report_candidate";
-        case LOG_LTE_PHY_RI_REPORT: return "lte_phy_ri_report_candidate";
-        case LOG_LTE_PHY_PMI_REPORT: return "lte_phy_pmi_report_candidate";
+        case LOG_LTE_PHY_LEGACY_B175: return "lte_phy_legacy_b175_candidate";
+        case LOG_LTE_PHY_LEGACY_B176: return "lte_phy_legacy_b176_candidate";
+        case LOG_LTE_PHY_LEGACY_B177: return "lte_phy_legacy_b177_candidate";
+        case LOG_LTE_PHY_LEGACY_B178: return "lte_phy_legacy_b178_candidate";
         case LOG_LTE_ML1_MAC_RAR_MSG1: return "lte_ml1_mac_rar_msg1_report";
         case LOG_LTE_ML1_MAC_RAR_MSG2: return "lte_ml1_mac_rar_msg2_report";
         case LOG_LTE_ML1_MAC_RAR_MSG3: return "lte_ml1_mac_msg3_report";
@@ -551,7 +619,11 @@ static const char *log_name(uint16_t log_id) {
         case LOG_NR_RRC_SCELL: return "nr_rrc_serving_cell_info";
         case LOG_NR_RRC_CFG: return "nr_rrc_configuration_info";
         case LOG_NR_CA: return "nr_rrc_supported_ca_combos";
+        case LOG_NR_MAC_UL_TB_STATS: return "nr_mac_ul_tb_stats_candidate";
+        case LOG_NR_MAC_UL_PHYS_CH_SCHED: return "nr_mac_ul_physical_channel_schedule_candidate";
+        case LOG_NR_MAC_PDSCH_STATS: return "nr_mac_pdsch_stats_candidate";
         case LOG_NR_MAC_RACH_ATTEMPT: return "nr_mac_rach_attempt";
+        case LOG_NR_ML1_SERVING_CELL_BEAM_MGMT: return "nr_ml1_serving_cell_beam_management_candidate";
         case LOG_NR_ML1: return "nr_ml1_meas_database_update";
         default: return "unknown";
     }
@@ -757,16 +829,20 @@ static void write_lte_mac(FILE *f) {
     if (state.pusch.valid) {
         const lte_phy_pusch_t *p = &state.pusch;
         fprintf(f,
-                "{\"updated_at\":%ld,\"qxdm_ts\":%llu,\"tti\":%u,"
-                "\"sfn_guess\":%u,\"subframe_guess\":%u,\"grant\":%u,"
-                "\"tx_power_raw\":%d,\"field_10_raw\":%u,"
-                "\"field_34_raw\":%u,\"field_36_raw\":%u,"
-                "\"field_40_raw\":%u,\"field_42_raw\":%u,"
-                "\"field_46_raw\":%u}",
-                (long)p->updated_at, (unsigned long long)p->qts, p->tti,
-                p->sfn_guess, p->subframe_guess, p->grant, p->tx_power_raw,
-                p->field_10_raw, p->field_34_raw, p->field_36_raw,
-                p->field_40_raw, p->field_42_raw, p->field_46_raw);
+                "{\"updated_at\":%ld,\"qxdm_ts\":%llu,\"version\":%u,"
+                "\"tti\":%u,\"sfn_guess\":%u,\"subframe_guess\":%u,"
+                "\"carrier_id\":%u,\"rb_start_slot0\":%u,"
+                "\"rb_start_slot1\":%u,\"rb_count\":%u,"
+                "\"tb_size\":%u,\"grant\":%u,\"coding_rate\":%.3f,"
+                "\"pusch_mod_order\":%u,\"pusch_modulation\":",
+                (long)p->updated_at, (unsigned long long)p->qts,
+                p->version, p->tti, p->sfn, p->subframe, p->carrier_id,
+                p->rb_start_slot0, p->rb_start_slot1, p->rb_count,
+                p->tb_size, p->grant, p->coding_rate, p->pusch_mod_order);
+        json_string(f, lte_modulation_name(p->pusch_mod_order));
+        fprintf(f,
+                ",\"tx_power_raw\":%u,\"tx_power_dbm_candidate\":%d}",
+                p->tx_power_raw, p->tx_power_dbm_candidate);
     } else {
         fputs("{}", f);
     }
@@ -898,34 +974,100 @@ static void write_lte_phy(FILE *f) {
     if (state.pusch.valid) {
         const lte_phy_pusch_t *p = &state.pusch;
         fprintf(f,
-                "{\"updated_at\":%ld,\"qxdm_ts\":%llu,\"confidence\":\"timing_grant_confirmed\","
-                "\"tti\":%u,\"sfn_guess\":%u,\"subframe_guess\":%u,\"grant\":%u,"
-                "\"tx_power_raw\":%d,\"field_10_raw\":%u,\"field_34_raw\":%u,"
-                "\"field_36_raw\":%u,\"field_40_raw\":%u,\"field_42_raw\":%u,"
-                "\"field_46_raw\":%u}",
-                (long)p->updated_at, (unsigned long long)p->qts, p->tti,
-                p->sfn_guess, p->subframe_guess, p->grant, p->tx_power_raw,
-                p->field_10_raw, p->field_34_raw, p->field_36_raw,
-                p->field_40_raw, p->field_42_raw, p->field_46_raw);
+                "{\"updated_at\":%ld,\"qxdm_ts\":%llu,"
+                "\"confidence\":\"layout_decoded\","
+                "\"version\":%u,\"header_word\":%u,\"serving_cell_id\":%u,"
+                "\"dispatch_sfn\":%u,\"dispatch_subframe\":%u,"
+                "\"record_index\":%u,\"record_count\":%u,"
+                "\"tti\":%u,\"sfn_guess\":%u,\"subframe_guess\":%u,"
+                "\"carrier_id\":%u,\"ack_flag\":%u,\"cqi_flag\":%u,"
+                "\"ri_flag\":%u,\"frequency_hopping\":%u,\"retx_index\":%u,"
+                "\"rv\":%u,\"mirror_hopping\":%u,"
+                "\"ra_type\":%u,\"rb_start_slot0\":%u,"
+                "\"rb_start_slot1\":%u,\"rb_count\":%u,"
+                "\"tb_size\":%u,\"grant\":%u,\"coding_rate_raw\":%u,"
+                "\"coding_rate\":%.3f,\"pusch_mod_order\":%u,"
+                "\"pusch_modulation\":",
+                (long)p->updated_at, (unsigned long long)p->qts,
+                p->version, p->header_word, p->serving_cell_id,
+                p->dispatch_sfn, p->dispatch_subframe,
+                p->record_index, p->record_count, p->tti, p->sfn,
+                p->subframe, p->carrier_id, p->ack_flag, p->cqi_flag,
+                p->ri_flag, p->frequency_hopping, p->retx_index, p->rv,
+                p->mirror_hopping, p->ra_type, p->rb_start_slot0,
+                p->rb_start_slot1, p->rb_count, p->tb_size, p->grant,
+                p->coding_rate_raw, p->coding_rate, p->pusch_mod_order);
+        json_string(f, lte_modulation_name(p->pusch_mod_order));
+        fprintf(f,
+                ",\"mod_gain_cluster_raw\":%u,\"tx_cqi_raw\":%u,"
+                "\"tx_power_raw\":%u,\"tx_power_dbm_candidate\":%d}",
+                p->mod_gain_cluster_raw, p->tx_cqi_raw, p->tx_power_raw,
+                p->tx_power_dbm_candidate);
     } else {
         fputs("{}", f);
     }
     fputs(",\"pdsch_stat_candidate\":", f);
     if (state.pdsch.valid) {
         const lte_phy_pdsch_t *p = &state.pdsch;
-        fprintf(f,
-                "{\"updated_at\":%ld,\"qxdm_ts\":%llu,\"confidence\":\"candidate_unconfirmed\","
-                "\"version\":%u,\"subversion\":%u,\"header_word\":%u,"
-                "\"record_index\":%u,\"record_count\":%u,\"tti_guess\":%u,"
-                "\"mcs_candidate_raw\":%u,\"field_0_raw\":%u,\"field_2_raw\":%u,"
-                "\"field_4_raw\":%u,\"field_8_raw\":%u,\"field_12_raw\":%u,"
-                "\"field_16_raw\":%u,\"field_18_raw\":%u,\"field_20_raw\":%u,"
-                "\"field_24_raw\":%u,\"field_28_raw\":%u}",
-                (long)p->updated_at, (unsigned long long)p->qts, p->version,
-                p->subversion, p->header_word, p->record_index, p->record_count,
-                p->tti_guess, p->mcs_candidate_raw, p->field_0_raw, p->field_2_raw,
-                p->field_4_raw, p->field_8_raw, p->field_12_raw, p->field_16_raw,
-                p->field_18_raw, p->field_20_raw, p->field_24_raw, p->field_28_raw);
+        if (p->decoded) {
+            fprintf(f,
+                    "{\"updated_at\":%ld,\"qxdm_ts\":%llu,"
+                    "\"confidence\":\"layout_v36_decoded\","
+                    "\"version\":%u,\"header_word\":%u,"
+                    "\"record_index\":%u,\"record_count\":%u,"
+                    "\"sfn\":%u,\"subframe\":%u,\"num_rbs\":%u,"
+                    "\"num_layers\":%u,\"num_transport_blocks\":%u,"
+                    "\"serving_cell_id\":%u,\"hsic_enabled\":%u,"
+                    "\"crc_pass_total\":%llu,\"crc_fail_total\":%llu,"
+                    "\"dl_bler\":%.4f,\"transport_blocks\":[",
+                    (long)p->updated_at, (unsigned long long)p->qts,
+                    p->version, p->header_word, p->record_index,
+                    p->record_count, p->sfn, p->subframe, p->num_rbs,
+                    p->num_layers, p->num_transport_blocks,
+                    p->serving_cell_id, p->hsic_enabled,
+                    p->crc_pass_total, p->crc_fail_total, p->dl_bler);
+            int first_tb = 1;
+            for (int i = 0; i < 2; i++) {
+                const lte_phy_pdsch_tb_t *tb = &p->tb[i];
+                if (!tb->valid) continue;
+                if (!first_tb) fputc(',', f);
+                fprintf(f,
+                        "{\"tb_index\":%u,\"harq_id\":%u,\"rv\":%u,"
+                        "\"ndi\":%u,\"crc_result\":%u,\"rnti_type\":%u,"
+                        "\"discarded_retx_present\":%u,"
+                        "\"did_recombining\":%u,\"tb_size\":%u,"
+                        "\"mcs\":%u,\"num_rbs\":%u,"
+                        "\"modulation_type\":%u,\"modulation\":",
+                        tb->tb_index, tb->harq_id, tb->rv, tb->ndi,
+                        tb->crc_result, tb->rnti_type,
+                        tb->discarded_retx_present, tb->did_recombining,
+                        tb->tb_size, tb->mcs, tb->num_rbs,
+                        tb->modulation_type);
+                json_string(f, lte_modulation_name(tb->modulation_type));
+                fprintf(f, ",\"qed2_interim\":%u}", tb->qed2_interim);
+                first_tb = 0;
+            }
+            fputs("]}", f);
+        } else {
+            fprintf(f,
+                    "{\"updated_at\":%ld,\"qxdm_ts\":%llu,"
+                    "\"confidence\":\"candidate_unconfirmed\","
+                    "\"version\":%u,\"subversion\":%u,\"header_word\":%u,"
+                    "\"record_index\":%u,\"record_count\":%u,"
+                    "\"tti_guess\":%u,\"mcs_candidate_raw\":%u,"
+                    "\"field_0_raw\":%u,\"field_2_raw\":%u,"
+                    "\"field_4_raw\":%u,\"field_8_raw\":%u,"
+                    "\"field_12_raw\":%u,\"field_16_raw\":%u,"
+                    "\"field_18_raw\":%u,\"field_20_raw\":%u,"
+                    "\"field_24_raw\":%u,\"field_28_raw\":%u}",
+                    (long)p->updated_at, (unsigned long long)p->qts,
+                    p->version, p->subversion, p->header_word,
+                    p->record_index, p->record_count, p->field_0_raw,
+                    p->mcs_candidate_raw, p->field_0_raw, p->field_2_raw,
+                    p->field_4_raw, p->field_8_raw, p->field_12_raw,
+                    p->field_16_raw, p->field_18_raw, p->field_20_raw,
+                    p->field_24_raw, p->field_28_raw);
+        }
     } else {
         fputs("{}", f);
     }
@@ -1080,16 +1222,22 @@ static int is_probe_phy_log(uint16_t log_id) {
         case LOG_LTE_PHY_PDCCH_DECODING_RESULT2:
         case LOG_LTE_PHY_PUSCH_TX_REPORT:
         case LOG_LTE_PHY_PUCCH_TX_REPORT:
+        case LOG_LTE_PHY_SRS_TX_REPORT:
+        case LOG_LTE_PHY_RACH_TX_REPORT:
+        case LOG_LTE_PHY_PUCCH_CSF_REPORT:
         case LOG_LTE_PHY_PUSCH_CSF_REPORT:
-        case LOG_LTE_PHY_PDSCH_STAT_INDICATION:
         case LOG_LTE_PHY_PDCCH_PHICH_INDICATION:
         case LOG_LTE_PHY_GM_TX_REPORT:
         case LOG_LTE_PHY_PDSCH_STAT_INDICATION2:
         case LOG_LTE_PHY_PUSCH_STAT_INDICATION:
-        case LOG_LTE_PHY_PUCCH_CSF_REPORT:
-        case LOG_LTE_PHY_CQI_REPORT:
-        case LOG_LTE_PHY_RI_REPORT:
-        case LOG_LTE_PHY_PMI_REPORT:
+        case LOG_LTE_PHY_LEGACY_B175:
+        case LOG_LTE_PHY_LEGACY_B176:
+        case LOG_LTE_PHY_LEGACY_B177:
+        case LOG_LTE_PHY_LEGACY_B178:
+        case LOG_NR_MAC_UL_TB_STATS:
+        case LOG_NR_MAC_UL_PHYS_CH_SCHED:
+        case LOG_NR_MAC_PDSCH_STATS:
+        case LOG_NR_ML1_SERVING_CELL_BEAM_MGMT:
             return 1;
         default:
             return 0;
@@ -1632,41 +1780,91 @@ static int parse_lte_mac(uint16_t log_id, uint64_t qts, const uint8_t *b, size_t
 }
 
 static int parse_lte_phy_pusch_tx_candidate(uint16_t log_id, uint64_t qts, const uint8_t *b, size_t len) {
-    if (len < 108 || b[0] != 0xA1 || ((len - 8) % 100) != 0) return 0;
-    uint16_t header_tti = get16(b + 4);
-    size_t count = (len - 8) / 100;
+    if (len < 8) return 0;
+    uint8_t ver = b[0];
+    size_t rec_size;
+    if (ver == 102) rec_size = 68;
+    else if (ver == 144 || ver == 161) rec_size = 100;
+    else return 0;
+    if ((len - 8) % rec_size) return 0;
+    uint16_t header_word = ver == 161 ? get16(b + 2) : get16(b + 1);
+    uint16_t dispatch_tti = get16(b + 4);
+    size_t count = (len - 8) / rec_size;
     for (size_t i = 0; i < count; i++) {
-        const uint8_t *rec = b + 8 + i * 100;
+        const uint8_t *rec = b + 8 + i * rec_size;
         uint16_t tti = get16(rec);
-        uint16_t grant = get16(rec + 8);
-        int16_t tx_power_raw = (int16_t)get16(rec + 4);
+        uint16_t flags = get16(rec + 2);
+        uint32_t alloc = get32(rec + 4);
+        uint16_t tb_size = get16(rec + 8);
+        uint16_t coding_rate_raw = get16(rec + 10);
+        size_t mod_offset = rec_size == 68 ? 20 : 36;
+        size_t tx_offset = rec_size == 68 ? 24 : 40;
+        uint32_t mod_gain = get32(rec + mod_offset);
+        uint32_t tx_cqi = get32(rec + tx_offset);
         state.pusch.valid = 1;
+        state.pusch.version = ver;
+        state.pusch.header_word = header_word;
+        state.pusch.serving_cell_id = ver == 161 ? 0 : bitu32(header_word, 0, 4);
+        state.pusch.dispatch_sfn = (dispatch_tti / 10) % 1024;
+        state.pusch.dispatch_subframe = dispatch_tti % 10;
+        state.pusch.record_index = (uint16_t)i;
+        state.pusch.record_count = (uint16_t)count;
         state.pusch.tti = tti;
-        state.pusch.sfn_guess = (tti / 10) % 1024;
-        state.pusch.subframe_guess = tti % 10;
-        state.pusch.grant = grant;
-        state.pusch.tx_power_raw = tx_power_raw;
-        state.pusch.field_10_raw = get16(rec + 10);
-        state.pusch.field_34_raw = get16(rec + 34);
-        state.pusch.field_36_raw = get16(rec + 36);
-        state.pusch.field_40_raw = get16(rec + 40);
-        state.pusch.field_42_raw = get16(rec + 42);
-        state.pusch.field_46_raw = get16(rec + 46);
+        state.pusch.sfn = (tti / 10) % 1024;
+        state.pusch.subframe = tti % 10;
+        state.pusch.carrier_id = bitu32(flags, 0, 2);
+        state.pusch.ack_flag = bitu32(flags, 2, 1);
+        state.pusch.cqi_flag = bitu32(flags, 3, 1);
+        state.pusch.ri_flag = bitu32(flags, 4, 1);
+        state.pusch.frequency_hopping = bitu32(flags, 5, 2);
+        state.pusch.retx_index = bitu32(flags, 7, 5);
+        state.pusch.rv = bitu32(flags, 12, 2);
+        state.pusch.mirror_hopping = bitu32(flags, 14, 2);
+        state.pusch.ra_type = bitu32(alloc, 0, 1);
+        state.pusch.rb_start_slot0 = bitu32(alloc, 1, 7);
+        state.pusch.rb_start_slot1 = bitu32(alloc, 8, 7);
+        state.pusch.rb_count = bitu32(alloc, 15, 7);
+        state.pusch.tb_size = tb_size;
+        state.pusch.grant = tb_size;
+        state.pusch.coding_rate_raw = coding_rate_raw;
+        state.pusch.coding_rate = (double)coding_rate_raw / 1024.0;
+        state.pusch.pusch_mod_order = bitu32(mod_gain, 0, 3);
+        state.pusch.mod_gain_cluster_raw = mod_gain;
+        state.pusch.tx_cqi_raw = tx_cqi;
+        state.pusch.tx_power_raw = bitu32(tx_cqi, 0, 7);
+        state.pusch.tx_power_dbm_candidate = (int16_t)state.pusch.tx_power_raw - 128;
         state.pusch.qts = qts;
         state.pusch.updated_at = time(NULL);
         if (opt_stream_json) {
             json_prefix(log_id, qts, "LTE", "lte_phy_pusch_tx_candidate");
-            printf(",\"version\":%u,\"subversion\":%u,\"header_tti\":%u,"
+            printf(",\"version\":%u,\"header_word\":%u,"
+                   "\"dispatch_sfn\":%u,\"dispatch_subframe\":%u,"
                    "\"record_index\":%zu,\"record_count\":%zu,\"tti\":%u,"
-                   "\"sfn_guess\":%u,\"subframe_guess\":%u,\"record_flags_raw\":%u,"
-                   "\"grant\":%u,\"tx_power_raw\":%d,\"field_10_raw\":%u,"
-                   "\"field_34_raw\":%u,\"field_36_raw\":%u,\"field_40_raw\":%u,"
-                   "\"field_42_raw\":%u,\"field_46_raw\":%u,\"record_hex\":\"",
-                   b[0], b[1], header_tti, i, count, tti, (tti / 10) % 1024,
-                   tti % 10, get16(rec + 2), grant, tx_power_raw, get16(rec + 10),
-                   get16(rec + 34), get16(rec + 36), get16(rec + 40), get16(rec + 42),
-                   get16(rec + 46));
-            hexprint(stdout, rec, 100);
+                   "\"sfn_guess\":%u,\"subframe_guess\":%u,"
+                   "\"record_flags_raw\":%u,\"carrier_id\":%u,"
+                   "\"ack_flag\":%u,\"cqi_flag\":%u,\"ri_flag\":%u,"
+                   "\"retx_index\":%u,\"rv\":%u,\"ra_type\":%u,"
+                   "\"rb_start_slot0\":%u,\"rb_start_slot1\":%u,"
+                   "\"rb_count\":%u,\"tb_size\":%u,\"grant\":%u,"
+                   "\"coding_rate_raw\":%u,\"coding_rate\":%.3f,"
+                   "\"pusch_mod_order\":%u,\"pusch_modulation\":",
+                   ver, header_word, (dispatch_tti / 10) % 1024,
+                   dispatch_tti % 10, i, count, tti, (tti / 10) % 1024,
+                   tti % 10, flags, state.pusch.carrier_id,
+                   state.pusch.ack_flag, state.pusch.cqi_flag,
+                   state.pusch.ri_flag, state.pusch.retx_index,
+                   state.pusch.rv, state.pusch.ra_type,
+                   state.pusch.rb_start_slot0, state.pusch.rb_start_slot1,
+                   state.pusch.rb_count, tb_size, tb_size,
+                   coding_rate_raw, (double)coding_rate_raw / 1024.0,
+                   state.pusch.pusch_mod_order);
+            json_string(stdout, lte_modulation_name(state.pusch.pusch_mod_order));
+            printf(",\"mod_gain_cluster_raw\":%u,\"tx_cqi_raw\":%u,"
+                   "\"tx_power_raw\":%u,\"tx_power_dbm_candidate\":%d,"
+                   "\"record_hex\":\"",
+                   mod_gain, tx_cqi, state.pusch.tx_power_raw,
+                   state.pusch.tx_power_dbm_candidate);
+            hexprint(stdout, rec, rec_size);
             printf("\"}\n");
         }
     }
@@ -1679,13 +1877,13 @@ static int parse_lte_phy_pdsch_stat_candidate(uint16_t log_id, uint64_t qts, con
     size_t count = (len - 4) / 40;
     for (size_t i = 0; i < count; i++) {
         const uint8_t *rec = b + 4 + i * 40;
+        memset(&state.pdsch, 0, sizeof(state.pdsch));
         state.pdsch.valid = 1;
         state.pdsch.version = b[0];
         state.pdsch.subversion = b[1];
         state.pdsch.header_word = header_word;
         state.pdsch.record_index = (uint16_t)i;
         state.pdsch.record_count = (uint16_t)count;
-        state.pdsch.tti_guess = get16(rec);
         state.pdsch.mcs_candidate_raw = rec[16];
         state.pdsch.field_0_raw = get16(rec);
         state.pdsch.field_2_raw = get16(rec + 2);
@@ -1699,18 +1897,95 @@ static int parse_lte_phy_pdsch_stat_candidate(uint16_t log_id, uint64_t qts, con
         state.pdsch.field_28_raw = get16(rec + 28);
         state.pdsch.qts = qts;
         state.pdsch.updated_at = time(NULL);
-        if (opt_stream_json) {
+        if (b[0] == 36) {
+            uint16_t sfn_subframe = get16(rec);
+            state.pdsch.decoded = 1;
+            state.pdsch.subframe = bitu32(sfn_subframe, 0, 4);
+            state.pdsch.sfn = bitu32(sfn_subframe, 4, 12);
+            state.pdsch.num_rbs = rec[2];
+            state.pdsch.num_layers = rec[3];
+            state.pdsch.num_transport_blocks = rec[4];
+            state.pdsch.serving_cell_id = bitu32(rec[5], 0, 3);
+            state.pdsch.hsic_enabled = bitu32(rec[5], 3, 4);
+            uint8_t tb_limit = state.pdsch.num_transport_blocks;
+            if (tb_limit > 2) tb_limit = 2;
+            for (uint8_t tb_i = 0; tb_i < tb_limit; tb_i++) {
+                const uint8_t *tbp = rec + 12 + (size_t)tb_i * 12;
+                lte_phy_pdsch_tb_t *tb = &state.pdsch.tb[tb_i];
+                tb->valid = 1;
+                tb->harq_id = bitu32(tbp[0], 0, 4);
+                tb->rv = bitu32(tbp[0], 4, 2);
+                tb->ndi = bitu32(tbp[0], 6, 1);
+                tb->crc_result = bitu32(tbp[0], 7, 1);
+                tb->rnti_type = bitu32(tbp[1], 0, 4);
+                tb->tb_index = bitu32(tbp[1], 4, 1);
+                tb->discarded_retx_present = bitu32(tbp[1], 5, 1);
+                tb->did_recombining = bitu32(tbp[1], 6, 1);
+                tb->tb_size = get16(tbp + 4);
+                tb->mcs = tbp[6];
+                tb->num_rbs = tbp[7];
+                tb->modulation_type = tbp[8];
+                tb->qed2_interim = tbp[9];
+                if (tb->crc_result) lte_pdsch_crc_pass_total++;
+                else lte_pdsch_crc_fail_total++;
+            }
+            unsigned long long total = lte_pdsch_crc_pass_total + lte_pdsch_crc_fail_total;
+            state.pdsch.crc_pass_total = lte_pdsch_crc_pass_total;
+            state.pdsch.crc_fail_total = lte_pdsch_crc_fail_total;
+            state.pdsch.dl_bler = total ? (double)lte_pdsch_crc_fail_total / (double)total : 0.0;
+        }
+        if (opt_stream_json && state.pdsch.decoded) {
             json_prefix(log_id, qts, "LTE", "lte_phy_pdsch_stat_candidate");
-            printf(",\"version\":%u,\"subversion\":%u,\"header_word\":%u,"
-                   "\"record_index\":%zu,\"record_count\":%zu,\"tti_guess\":%u,"
-                   "\"mcs_candidate_raw\":%u,\"field_0_raw\":%u,\"field_2_raw\":%u,"
-                   "\"field_4_raw\":%u,\"field_8_raw\":%u,\"field_12_raw\":%u,"
-                   "\"field_16_raw\":%u,\"field_18_raw\":%u,\"field_20_raw\":%u,"
-                   "\"field_24_raw\":%u,\"field_28_raw\":%u,\"record_hex\":\"",
+            printf(",\"confidence\":\"layout_v36_decoded\","
+                   "\"version\":%u,\"header_word\":%u,"
+                   "\"record_index\":%zu,\"record_count\":%zu,"
+                   "\"sfn\":%u,\"subframe\":%u,\"num_rbs\":%u,"
+                   "\"num_layers\":%u,\"num_transport_blocks\":%u,"
+                   "\"serving_cell_id\":%u,\"hsic_enabled\":%u,"
+                   "\"crc_pass_total\":%llu,\"crc_fail_total\":%llu,"
+                   "\"dl_bler\":%.4f,\"transport_blocks\":[",
+                   b[0], header_word, i, count, state.pdsch.sfn,
+                   state.pdsch.subframe, state.pdsch.num_rbs,
+                   state.pdsch.num_layers, state.pdsch.num_transport_blocks,
+                   state.pdsch.serving_cell_id, state.pdsch.hsic_enabled,
+                   state.pdsch.crc_pass_total, state.pdsch.crc_fail_total,
+                   state.pdsch.dl_bler);
+            int first_tb = 1;
+            for (int tb_i = 0; tb_i < 2; tb_i++) {
+                const lte_phy_pdsch_tb_t *tb = &state.pdsch.tb[tb_i];
+                if (!tb->valid) continue;
+                if (!first_tb) fputc(',', stdout);
+                printf("{\"tb_index\":%u,\"harq_id\":%u,\"rv\":%u,"
+                       "\"ndi\":%u,\"crc_result\":%u,\"rnti_type\":%u,"
+                       "\"tb_size\":%u,\"mcs\":%u,\"num_rbs\":%u,"
+                       "\"modulation_type\":%u,\"modulation\":",
+                       tb->tb_index, tb->harq_id, tb->rv, tb->ndi,
+                       tb->crc_result, tb->rnti_type, tb->tb_size,
+                       tb->mcs, tb->num_rbs, tb->modulation_type);
+                json_string(stdout, lte_modulation_name(tb->modulation_type));
+                printf("}");
+                first_tb = 0;
+            }
+            printf("],\"record_hex\":\"");
+            hexprint(stdout, rec, 40);
+            printf("\"}\n");
+        } else if (opt_stream_json) {
+            json_prefix(log_id, qts, "LTE", "lte_phy_pdsch_stat_candidate");
+            printf(",\"confidence\":\"candidate_unconfirmed\","
+                   "\"version\":%u,\"subversion\":%u,\"header_word\":%u,"
+                   "\"record_index\":%zu,\"record_count\":%zu,"
+                   "\"tti_guess\":%u,\"mcs_candidate_raw\":%u,"
+                   "\"field_0_raw\":%u,\"field_2_raw\":%u,"
+                   "\"field_4_raw\":%u,\"field_8_raw\":%u,"
+                   "\"field_12_raw\":%u,\"field_16_raw\":%u,"
+                   "\"field_18_raw\":%u,\"field_20_raw\":%u,"
+                   "\"field_24_raw\":%u,\"field_28_raw\":%u,"
+                   "\"record_hex\":\"",
                    b[0], b[1], header_word, i, count, get16(rec), rec[16],
-                   get16(rec), get16(rec + 2), get16(rec + 4), get16(rec + 8),
-                   get16(rec + 12), get16(rec + 16), get16(rec + 18),
-                   get16(rec + 20), get16(rec + 24), get16(rec + 28));
+                   get16(rec), get16(rec + 2), get16(rec + 4),
+                   get16(rec + 8), get16(rec + 12), get16(rec + 16),
+                   get16(rec + 18), get16(rec + 20), get16(rec + 24),
+                   get16(rec + 28));
             hexprint(stdout, rec, 40);
             printf("\"}\n");
         }
@@ -2135,16 +2410,22 @@ int main(int argc, char **argv) {
         logs[count++] = LOG_LTE_PHY_PDCCH_DECODING_RESULT2;
         logs[count++] = LOG_LTE_PHY_PUSCH_TX_REPORT;
         logs[count++] = LOG_LTE_PHY_PUCCH_TX_REPORT;
+        logs[count++] = LOG_LTE_PHY_SRS_TX_REPORT;
+        logs[count++] = LOG_LTE_PHY_RACH_TX_REPORT;
+        logs[count++] = LOG_LTE_PHY_PUCCH_CSF_REPORT;
         logs[count++] = LOG_LTE_PHY_PUSCH_CSF_REPORT;
-        logs[count++] = LOG_LTE_PHY_PDSCH_STAT_INDICATION;
         logs[count++] = LOG_LTE_PHY_PDCCH_PHICH_INDICATION;
         logs[count++] = LOG_LTE_PHY_GM_TX_REPORT;
         logs[count++] = LOG_LTE_PHY_PDSCH_STAT_INDICATION2;
         logs[count++] = LOG_LTE_PHY_PUSCH_STAT_INDICATION;
-        logs[count++] = LOG_LTE_PHY_PUCCH_CSF_REPORT;
-        logs[count++] = LOG_LTE_PHY_CQI_REPORT;
-        logs[count++] = LOG_LTE_PHY_RI_REPORT;
-        logs[count++] = LOG_LTE_PHY_PMI_REPORT;
+        logs[count++] = LOG_LTE_PHY_LEGACY_B175;
+        logs[count++] = LOG_LTE_PHY_LEGACY_B176;
+        logs[count++] = LOG_LTE_PHY_LEGACY_B177;
+        logs[count++] = LOG_LTE_PHY_LEGACY_B178;
+        logs[count++] = LOG_NR_MAC_UL_TB_STATS;
+        logs[count++] = LOG_NR_MAC_UL_PHYS_CH_SCHED;
+        logs[count++] = LOG_NR_MAC_PDSCH_STATS;
+        logs[count++] = LOG_NR_ML1_SERVING_CELL_BEAM_MGMT;
     }
     err = set_log_stream_state(client_id, logs, count, 1, &log_stream_enabled);
     if (err != DIAG_DCI_NO_ERROR) {

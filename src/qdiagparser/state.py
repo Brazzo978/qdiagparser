@@ -9,16 +9,16 @@ from typing import Any
 
 MISSING_METRIC_PLACEHOLDERS: dict[str, Any] = {
     "lte": {
-        "dl_mcs": {"value": None, "status": "not_decoded", "source_candidates": ["LTE 0xB130/0xB132/0xB144/0xB173"]},
+        "dl_mcs": {"value": None, "status": "not_decoded", "source_candidates": ["LTE 0xB173 v36"]},
         "ul_mcs": {"value": None, "status": "not_decoded", "source_candidates": ["LTE 0xB139/0xB174"]},
-        "dl_modulation": {"value": None, "status": "not_decoded", "source_candidates": ["LTE 0xB130/0xB132/0xB144/0xB173"]},
+        "dl_modulation": {"value": None, "status": "not_decoded", "source_candidates": ["LTE 0xB173 v36"]},
         "ul_modulation": {"value": None, "status": "not_decoded", "source_candidates": ["LTE 0xB139/0xB174"]},
-        "dl_rb_alloc": {"value": None, "status": "not_decoded", "source_candidates": ["LTE 0xB126/0xB130/0xB132"]},
+        "dl_rb_alloc": {"value": None, "status": "not_decoded", "source_candidates": ["LTE 0xB173 v36"]},
         "ul_rb_alloc": {"value": None, "status": "not_decoded", "source_candidates": ["LTE 0xB139/0xB174"]},
-        "cqi": {"value": None, "status": "not_decoded", "source_candidates": ["LTE 0xB140/0xB175/0xB176"]},
-        "ri": {"value": None, "status": "not_decoded", "source_candidates": ["LTE 0xB177"]},
-        "pmi": {"value": None, "status": "not_decoded", "source_candidates": ["LTE 0xB178"]},
-        "bler": {"value": None, "status": "not_decoded", "source_candidates": ["LTE 0xB144/0xB173"]},
+        "cqi": {"value": None, "status": "not_decoded", "source_candidates": ["LTE 0xB14D/0xB14E"]},
+        "ri": {"value": None, "status": "not_decoded", "source_candidates": ["LTE 0xB14D/0xB14E"]},
+        "pmi": {"value": None, "status": "not_decoded", "source_candidates": ["LTE 0xB14D/0xB14E"]},
+        "bler": {"value": None, "status": "not_decoded", "source_candidates": ["LTE 0xB173 v36"]},
         "tx_power_dbm": {"value": None, "status": "not_decoded", "source_candidates": ["LTE 0xB139/0xB16D/0xB174"]},
     },
     "nr": {

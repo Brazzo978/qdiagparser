@@ -61,22 +61,52 @@
     },
     "phy": {
       "pusch_tx": {
+        "carrier_id": 0,
+        "coding_rate": 0.277,
         "event": "lte_phy_pusch_tx_candidate",
-        "field_10_raw": 284,
-        "field_34_raw": 0,
-        "field_36_raw": 100,
-        "field_40_raw": 0,
-        "field_42_raw": 0,
-        "field_46_raw": 88,
         "grant": 7,
         "log_id": "0xB139",
+        "pusch_mod_order": 4,
+        "pusch_modulation": "16QAM",
         "rat": "LTE",
+        "rb_count": 1,
+        "rb_start_slot0": 5,
+        "rb_start_slot1": 0,
         "record_flags_raw": 0,
         "record_index": 0,
         "sfn_guess": 486,
         "subframe_guess": 9,
+        "tb_size": 7,
         "tti": 4869,
-        "tx_power_raw": -15482
+        "tx_power_dbm_candidate": -128,
+        "tx_power_raw": 0
+      },
+      "pdsch_stat": {
+        "confidence": "layout_v36_decoded",
+        "crc_fail_total": 0,
+        "crc_pass_total": 1,
+        "dl_bler": 0.0,
+        "event": "lte_phy_pdsch_stat_candidate",
+        "log_id": "0xB173",
+        "num_layers": 2,
+        "num_rbs": 50,
+        "num_transport_blocks": 1,
+        "rat": "LTE",
+        "serving_cell_id": 0,
+        "sfn": 100,
+        "subframe": 7,
+        "transport_blocks": [
+          {
+            "crc_result": 1,
+            "harq_id": 5,
+            "mcs": 18,
+            "modulation": "64QAM",
+            "modulation_type": 6,
+            "num_rbs": 40,
+            "rv": 2,
+            "tb_size": 1000
+          }
+        ]
       }
     },
     "serving_cell_measurement": {
@@ -97,9 +127,9 @@
   },
   "missing_metrics": {
     "lte": {
-      "dl_mcs": {"source_candidates": ["LTE 0xB130/0xB132/0xB144/0xB173"], "status": "not_decoded", "value": null},
-      "dl_modulation": {"source_candidates": ["LTE 0xB130/0xB132/0xB144/0xB173"], "status": "not_decoded", "value": null},
-      "dl_rb_alloc": {"source_candidates": ["LTE 0xB126/0xB130/0xB132"], "status": "not_decoded", "value": null},
+      "dl_mcs": {"source_candidates": ["LTE 0xB173 v36"], "status": "not_decoded", "value": null},
+      "dl_modulation": {"source_candidates": ["LTE 0xB173 v36"], "status": "not_decoded", "value": null},
+      "dl_rb_alloc": {"source_candidates": ["LTE 0xB173 v36"], "status": "not_decoded", "value": null},
       "ul_mcs": {"source_candidates": ["LTE 0xB139/0xB174"], "status": "not_decoded", "value": null},
       "ul_modulation": {"source_candidates": ["LTE 0xB139/0xB174"], "status": "not_decoded", "value": null},
       "ul_rb_alloc": {"source_candidates": ["LTE 0xB139/0xB174"], "status": "not_decoded", "value": null}

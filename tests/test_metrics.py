@@ -61,6 +61,67 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(event["mcs_candidate_raw"], 18)
         self.assertEqual(event["confidence"], "candidate_unconfirmed")
 
+    def test_lte_phy_pusch_tx_v161_layout(self):
+        rec = bytearray(100)
+        flags = 1 | (1 << 2) | (1 << 3) | (2 << 7) | (1 << 12)
+        alloc = 1 | (10 << 1) | (12 << 8) | (25 << 15)
+        struct.pack_into("<H", rec, 0, 5678)
+        struct.pack_into("<H", rec, 2, flags)
+        struct.pack_into("<I", rec, 4, alloc)
+        struct.pack_into("<H", rec, 8, 321)
+        struct.pack_into("<H", rec, 10, 512)
+        struct.pack_into("<I", rec, 36, 4)
+        struct.pack_into("<I", rec, 40, 43)
+        body = bytes([161, 174]) + struct.pack("<HH", 2, 1234) + b"\x00\x00" + bytes(rec)
+        pkt = DiagLogPacket(0xB139, parse_qxdm_ts(0), 0, body)
+        event = MetricsParser().parse(pkt)[0]
+        self.assertEqual(event["event"], "lte_phy_pusch_tx_candidate")
+        self.assertEqual(event["version"], 161)
+        self.assertEqual(event["sfn_guess"], 567)
+        self.assertEqual(event["subframe_guess"], 8)
+        self.assertEqual(event["carrier_id"], 1)
+        self.assertEqual(event["rv"], 1)
+        self.assertEqual(event["rb_start_slot0"], 10)
+        self.assertEqual(event["rb_start_slot1"], 12)
+        self.assertEqual(event["rb_count"], 25)
+        self.assertEqual(event["tb_size"], 321)
+        self.assertEqual(event["coding_rate"], 0.5)
+        self.assertEqual(event["pusch_modulation"], "16QAM")
+        self.assertEqual(event["tx_power_dbm_candidate"], -85)
+
+    def test_lte_phy_pdsch_stat_v36_layout(self):
+        rec = bytearray(40)
+        struct.pack_into("<H", rec, 0, (100 << 4) | 7)
+        rec[2] = 50
+        rec[3] = 2
+        rec[4] = 1
+        rec[5] = 3
+        tb = 12
+        rec[tb] = 5 | (2 << 4) | (1 << 6) | (1 << 7)
+        rec[tb + 1] = 2
+        struct.pack_into("<H", rec, tb + 4, 1000)
+        rec[tb + 6] = 18
+        rec[tb + 7] = 40
+        rec[tb + 8] = 6
+        body = bytes([36, 1, 0, 0]) + bytes(rec)
+        pkt = DiagLogPacket(0xB173, parse_qxdm_ts(0), 0, body)
+        event = MetricsParser().parse(pkt)[0]
+        self.assertEqual(event["confidence"], "layout_v36_decoded")
+        self.assertEqual(event["sfn"], 100)
+        self.assertEqual(event["subframe"], 7)
+        self.assertEqual(event["num_rbs"], 50)
+        self.assertEqual(event["serving_cell_id"], 3)
+        tb0 = event["transport_blocks"][0]
+        self.assertEqual(tb0["harq_id"], 5)
+        self.assertEqual(tb0["rv"], 2)
+        self.assertEqual(tb0["tb_size"], 1000)
+        self.assertEqual(tb0["mcs"], 18)
+        self.assertEqual(tb0["num_rbs"], 40)
+        self.assertEqual(tb0["modulation"], "64QAM")
+        self.assertEqual(event["crc_pass_total"], 1)
+        self.assertEqual(event["crc_fail_total"], 0)
+        self.assertEqual(event["dl_bler"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

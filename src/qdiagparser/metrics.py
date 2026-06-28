@@ -41,6 +41,15 @@ def q7_signed(raw: int) -> float:
     return round((((integer ^ 0xFF) + 1) * -1) + frac * 0.0078125, 2)
 
 
+def lte_modulation_name(order: int) -> str:
+    return {
+        2: "QPSK",
+        4: "16QAM",
+        6: "64QAM",
+        8: "256QAM",
+    }.get(order, "unknown")
+
+
 def snr_lte(raw: int) -> float:
     return round(raw * 0.1 - 20.0, 2)
 
@@ -71,6 +80,10 @@ def warn(pkt: DiagLogPacket, reason: str) -> dict[str, Any]:
 
 
 class MetricsParser:
+    def __init__(self):
+        self.lte_pdsch_crc_pass_total = 0
+        self.lte_pdsch_crc_fail_total = 0
+
     def parse(self, pkt: DiagLogPacket) -> list[dict[str, Any]]:
         parser = {
             0xB063: self.lte_mac_dl_transport_block,
@@ -126,36 +139,68 @@ class MetricsParser:
 
     def lte_phy_pusch_tx_candidate(self, pkt: DiagLogPacket) -> list[dict[str, Any]]:
         body = pkt.body
-        if len(body) < 108 or body[0] != 0xA1:
+        if len(body) < 8:
             return [warn(pkt, "unknown LTE PHY PUSCH TX candidate layout")]
-        if (len(body) - 8) % 100:
+        version = body[0]
+        if version == 102:
+            record_size = 68
+        elif version in (144, 161):
+            record_size = 100
+        else:
+            return [warn(pkt, f"unknown LTE PHY PUSCH TX candidate version {version}")]
+        if (len(body) - 8) % record_size:
             return [warn(pkt, f"unexpected LTE PHY PUSCH TX candidate length {len(body)}")]
-        header_tti = struct.unpack_from("<H", body, 4)[0]
+        header_word = struct.unpack_from("<H", body, 2 if version == 161 else 1)[0]
+        dispatch_tti = struct.unpack_from("<H", body, 4)[0]
         events: list[dict[str, Any]] = []
-        for index, pos in enumerate(range(8, len(body), 100)):
-            rec = body[pos:pos + 100]
+        for index, pos in enumerate(range(8, len(body), record_size)):
+            rec = body[pos:pos + record_size]
             tti = struct.unpack_from("<H", rec, 0)[0]
-            grant = struct.unpack_from("<H", rec, 8)[0]
-            tx_power_raw = struct.unpack_from("<h", rec, 4)[0]
+            flags = struct.unpack_from("<H", rec, 2)[0]
+            alloc = struct.unpack_from("<I", rec, 4)[0]
+            tb_size = struct.unpack_from("<H", rec, 8)[0]
+            coding_rate_raw = struct.unpack_from("<H", rec, 10)[0]
+            mod_offset = 20 if record_size == 68 else 36
+            tx_offset = 24 if record_size == 68 else 40
+            mod_gain = struct.unpack_from("<I", rec, mod_offset)[0]
+            tx_cqi = struct.unpack_from("<I", rec, tx_offset)[0]
+            mod_order = bits(mod_gain, 0, 3)
+            tx_power_raw = bits(tx_cqi, 0, 7)
             event = base(pkt, "lte_phy_pusch_tx_candidate", "LTE")
             event.update({
-                "version": body[0],
-                "subversion": body[1],
-                "header_tti": header_tti,
+                "version": version,
+                "header_word": header_word,
+                "serving_cell_id": 0 if version == 161 else bits(header_word, 0, 4),
+                "dispatch_sfn": (dispatch_tti // 10) % 1024,
+                "dispatch_subframe": dispatch_tti % 10,
                 "record_index": index,
-                "record_count": (len(body) - 8) // 100,
+                "record_count": (len(body) - 8) // record_size,
                 "tti": tti,
                 "sfn_guess": (tti // 10) % 1024,
                 "subframe_guess": tti % 10,
-                "record_flags_raw": struct.unpack_from("<H", rec, 2)[0],
-                "grant": grant,
+                "record_flags_raw": flags,
+                "carrier_id": bits(flags, 0, 2),
+                "ack_flag": bits(flags, 2, 1),
+                "cqi_flag": bits(flags, 3, 1),
+                "ri_flag": bits(flags, 4, 1),
+                "frequency_hopping": bits(flags, 5, 2),
+                "retx_index": bits(flags, 7, 5),
+                "rv": bits(flags, 12, 2),
+                "mirror_hopping": bits(flags, 14, 2),
+                "ra_type": bits(alloc, 0, 1),
+                "rb_start_slot0": bits(alloc, 1, 7),
+                "rb_start_slot1": bits(alloc, 8, 7),
+                "rb_count": bits(alloc, 15, 7),
+                "tb_size": tb_size,
+                "grant": tb_size,
+                "coding_rate_raw": coding_rate_raw,
+                "coding_rate": round(coding_rate_raw / 1024.0, 3),
+                "pusch_mod_order": mod_order,
+                "pusch_modulation": lte_modulation_name(mod_order),
+                "mod_gain_cluster_raw": mod_gain,
+                "tx_cqi_raw": tx_cqi,
                 "tx_power_raw": tx_power_raw,
-                "field_10_raw": struct.unpack_from("<H", rec, 10)[0],
-                "field_34_raw": struct.unpack_from("<H", rec, 34)[0],
-                "field_36_raw": struct.unpack_from("<H", rec, 36)[0],
-                "field_40_raw": struct.unpack_from("<H", rec, 40)[0],
-                "field_42_raw": struct.unpack_from("<H", rec, 42)[0],
-                "field_46_raw": struct.unpack_from("<H", rec, 46)[0],
+                "tx_power_dbm_candidate": tx_power_raw - 128,
                 "record_hex": rec.hex(),
             })
             events.append(event)
@@ -170,12 +215,61 @@ class MetricsParser:
         for index, pos in enumerate(range(4, len(body), 40)):
             rec = body[pos:pos + 40]
             event = base(pkt, "lte_phy_pdsch_stat_candidate", "LTE")
-            event.update({
+            common = {
                 "version": body[0],
                 "subversion": body[1],
                 "header_word": header_word,
                 "record_index": index,
                 "record_count": (len(body) - 4) // 40,
+            }
+            if body[0] == 36:
+                sfn_subframe = struct.unpack_from("<H", rec, 0)[0]
+                transport_blocks = []
+                num_tbs = min(rec[4], 2)
+                for tb_index in range(num_tbs):
+                    tb = rec[12 + tb_index * 12:24 + tb_index * 12]
+                    crc_result = bits(tb[0], 7, 1)
+                    if crc_result:
+                        self.lte_pdsch_crc_pass_total += 1
+                    else:
+                        self.lte_pdsch_crc_fail_total += 1
+                    mod_type = tb[8]
+                    transport_blocks.append({
+                        "tb_index": bits(tb[1], 4, 1),
+                        "harq_id": bits(tb[0], 0, 4),
+                        "rv": bits(tb[0], 4, 2),
+                        "ndi": bits(tb[0], 6, 1),
+                        "crc_result": crc_result,
+                        "rnti_type": bits(tb[1], 0, 4),
+                        "discarded_retx_present": bits(tb[1], 5, 1),
+                        "did_recombining": bits(tb[1], 6, 1),
+                        "tb_size": struct.unpack_from("<H", tb, 4)[0],
+                        "mcs": tb[6],
+                        "num_rbs": tb[7],
+                        "modulation_type": mod_type,
+                        "modulation": lte_modulation_name(mod_type),
+                        "qed2_interim": tb[9],
+                    })
+                total = self.lte_pdsch_crc_pass_total + self.lte_pdsch_crc_fail_total
+                event.update(common)
+                event.update({
+                    "confidence": "layout_v36_decoded",
+                    "sfn": bits(sfn_subframe, 4, 12),
+                    "subframe": bits(sfn_subframe, 0, 4),
+                    "num_rbs": rec[2],
+                    "num_layers": rec[3],
+                    "num_transport_blocks": rec[4],
+                    "serving_cell_id": bits(rec[5], 0, 3),
+                    "hsic_enabled": bits(rec[5], 3, 4),
+                    "crc_pass_total": self.lte_pdsch_crc_pass_total,
+                    "crc_fail_total": self.lte_pdsch_crc_fail_total,
+                    "dl_bler": round(self.lte_pdsch_crc_fail_total / total, 4) if total else 0.0,
+                    "transport_blocks": transport_blocks,
+                    "record_hex": rec.hex(),
+                })
+            else:
+                event.update(common)
+                event.update({
                 "tti_guess": struct.unpack_from("<H", rec, 0)[0],
                 "mcs_candidate_raw": rec[16],
                 "field_0_raw": struct.unpack_from("<H", rec, 0)[0],
@@ -190,7 +284,7 @@ class MetricsParser:
                 "field_28_raw": struct.unpack_from("<H", rec, 28)[0],
                 "confidence": "candidate_unconfirmed",
                 "record_hex": rec.hex(),
-            })
+                })
             events.append(event)
         return events
 
