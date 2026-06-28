@@ -27,6 +27,7 @@ This is the production WebUI path for very small modem CPUs. The binary collects
 Recommended request modes:
 
 - `--require signal`: best default for the signals page. It exits as soon as a fresh signal packet arrives.
+- `--require nr`: use for an NR-only panel when it must wait for fresh `0xB97F`/`nr.layers[]`.
 - `--require signal-mac`: use only when the page needs fresh MAC activity too; it can wait longer if traffic is idle.
 - `--require mac`: debug/traffic views only.
 - `--require any`: fastest smoke check, but weaker for GUI correctness.
@@ -108,6 +109,7 @@ The snapshot is intentionally compact and GUI-ready:
     "sample_events_seen": 19,
     "sample_signal_seen": true,
     "sample_mac_seen": true,
+    "sample_nr_seen": false,
     "diag_stream_active": false,
     "gui_lite": true,
     "nice_increment": 5,
@@ -202,7 +204,7 @@ Important nested keys:
 - `lte.phy.pdsch_stat_candidate`: latest `0xB173` PDSCH-stat candidate, raw/unconfirmed.
 - `lte.ca.observed_cc_ids[]`: component carriers observed from MAC activity, already normalized for 2CA/3CA/4CA views.
 - `nr.serving_cell`: latest NR serving cell info when emitted by the modem.
-- `nr.layers[]`: reserved for NR layer metrics; currently empty in the C snapshot until the NR ML1 decoder is promoted into the runtime.
+- `nr.layers[]`: latest NR ML1 layer/cell/beam metrics decoded from `0xB97F`.
 - `runtime.log_counts[]`: per-log counters for the current run, useful in probe/debug views to see which candidate logs are alive.
 
 ## Stable Events
@@ -279,6 +281,10 @@ Use for NR signal cards:
 - per layer: `serving_rsrp_dbm[]`, `rx_beam[]`, `rfic_id`, `subarray[]`
 - per cell/beam: `rsrp_dbm`, `rsrq_db`, filtered RSRP/RSRQ
 
+The modem-side C runtime currently decodes NR ML1 versions `2.7`, `2.9`, `2.10`, and `3.0`. It stores a bounded GUI snapshot of up to 4 layers, 4 cells per layer, and 4 beams per cell.
+
+Some Qualcomm summary fields can be sentinel/invalid even when cell and beam data is good. If a layer shows `serving_pci:65535`, `serving_cell_index:255`, `rfic_id:65535`, `subarray:65535`, or summary RSRP `0.00`, render those as unknown and prefer `cells[].beams[]` for the visible NR signal values.
+
 ## Missing Metric Placeholders
 
 The GUI must render these as unavailable/pending, not zero:
@@ -328,6 +334,7 @@ Validated on T99W175:
 - Final on-demand build was re-tested with the same profile: it exited in about 1 second, saw 9 DIAG events, wrote a 4.2 KB snapshot, had `runtime.diag_stream_active:false`, and left no running process.
 - Resident duty-cycle mode was live-tested with `--sample-window-ms 2000 --sample-min-ms 500 --max-runtime-sec 12 --mac --gui-lite`: it saw 14 DIAG events total, wrote a 4.4 KB snapshot, and ended with `runtime.diag_stream_active:false`.
 - Failure behavior was live-tested with `--oneshot --require mac --max-runtime-sec 3 --gui-lite` without `--mac`: it exited with code `2`, wrote `runtime.last_error:"sample timeout: require=mac not seen in 3000 ms"`, and left no running process.
+- NR on-demand mode was live-tested with `--oneshot --require nr --sample-min-ms 500 --max-runtime-sec 10 --gui-lite --no-raw-log`: it exited in about 2 seconds, wrote a 5.5 KB snapshot, saw `runtime.sample_nr_seen:true`, counted one `0xB97F`, and populated `nr.layers[0]` with `nr_arfcn:645312` plus cells/beams for PCI `499` and `825`.
 - Forced Hetzner download through `enx00e04c6802a5` produced LTE MAC DL/UL events.
 - QLTE and QNR combo payloads were captured as `b0cd_qlte.hex` and `b826_qnr.hex`.
 - `--probe-scheduling` was tested; it produced measurement/search/RACH candidates, not confirmed MCS/RB/modulation.

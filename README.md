@@ -71,6 +71,8 @@ adb shell '/tmp/qdiagmon-dci --snapshot-file /tmp/qdiag-state.json \
   >/dev/null 2>/tmp/qdiag-state.err; cat /tmp/qdiag-state.json'
 ```
 
+For an NR-only panel that must wait specifically for fresh `0xB97F` layer/beam data, use `--require nr` instead of `--require signal`.
+
 Snapshot mode writes `/tmp/qdiag-state.json.tmp` and renames it over `/tmp/qdiag-state.json`, so the CGI can serve the state without parsing large logs:
 
 ```sh
@@ -83,6 +85,8 @@ cat /tmp/qdiag-state.json 2>/dev/null || \
 The GUI should poll every 10000 ms and mark data stale after 30000 ms. Do not delete the snapshot after each request; it is intentionally overwritten in place to avoid races and NAND churn. In `--oneshot` mode, if the required packet is not seen within `--max-runtime-sec`, the binary writes a final snapshot with `runtime.last_error` and exits non-zero.
 
 If a resident process is needed instead of on-demand CGI refresh, keep the same snapshot options and omit `--oneshot`. Snapshot mode defaults to `--gui-lite`, `--sample-window-ms 2000`, and `--nice 5`; it also pauses DIAG early when the required fresh data arrives.
+
+The modem-side C snapshot populates `nr.layers[]` from `0xB97F` for NR ML1 versions `2.7`, `2.9`, `2.10`, and `3.0`. It keeps the snapshot bounded for GUI use: up to 4 layers, 4 cells per layer, and 4 beams per cell.
 
 For development captures, JSONL stream mode is still available:
 

@@ -117,8 +117,46 @@
   "nr": {
     "ml1_latest": {
       "event": "measurement_database_update",
-      "layers": [],
-      "rat": "NR"
+      "layers": [
+        {
+          "cells": [
+            {
+              "beams": [
+                {
+                  "filtered_l2nr_rsrp_dbm": -102.45,
+                  "filtered_l2nr_rsrq_db": -10.55,
+                  "filtered_nr2nr_rsrp_dbm": 0.0,
+                  "filtered_nr2nr_rsrq_db": 0.0,
+                  "index": 0,
+                  "rsrp_dbm": [-102.62, -102.45],
+                  "rx_beam": [0, 0],
+                  "ssb_index": 5,
+                  "ssb_ref_timing": 683306455581657608
+                }
+              ],
+              "index": 0,
+              "pbch_sfn": 748,
+              "pci": 499,
+              "rsrp_dbm": -102.45,
+              "rsrq_db": -10.55
+            }
+          ],
+          "layer": 0,
+          "nr_arfcn": 645312,
+          "num_cells": 2,
+          "rfic_id": 65535,
+          "rx_beam": [null, null],
+          "serving_cell_index": 255,
+          "serving_pci": 65535,
+          "serving_rsrp_dbm": [0.0, 0.0],
+          "serving_ssb": 15,
+          "subarray": [65535, 65535]
+        }
+      ],
+      "num_layers": 1,
+      "rat": "NR",
+      "ssb_periodicity": 0,
+      "version": "2.7"
     }
   },
   "warnings": []

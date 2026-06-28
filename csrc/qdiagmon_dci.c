@@ -111,15 +111,20 @@ static unsigned long long sample_events_seen = 0;
 static uint64_t sample_started_ms = 0;
 static int sample_signal_seen = 0;
 static int sample_mac_seen = 0;
+static int sample_nr_seen = 0;
 static char last_error[160] = "";
 
 #define REQUIRE_ANY 0
 #define REQUIRE_SIGNAL 1
 #define REQUIRE_SIGNAL_MAC 2
 #define REQUIRE_MAC 3
+#define REQUIRE_NR 4
 #define MAX_LTE_ANTENNA_CELLS 8
 #define MAX_LTE_CC 8
 #define MAX_LOG_COUNTS 64
+#define MAX_NR_LAYERS 4
+#define MAX_NR_CELLS 4
+#define MAX_NR_BEAMS 4
 
 typedef struct {
     const char *name;
@@ -272,6 +277,53 @@ typedef struct {
 
 typedef struct {
     int valid;
+    uint16_t index;
+    uint16_t ssb_index;
+    int rx_beam[2];
+    uint64_t ssb_ref_timing;
+    double rsrp_dbm[2];
+    int has_rsrq;
+    double rsrq_db[2];
+    double filtered_nr2nr_rsrp_dbm;
+    double filtered_nr2nr_rsrq_db;
+    double filtered_l2nr_rsrp_dbm;
+    double filtered_l2nr_rsrq_db;
+} nr_beam_t;
+
+typedef struct {
+    int valid;
+    uint16_t index;
+    uint16_t pci;
+    uint16_t pbch_sfn;
+    uint8_t num_beams;
+    double rsrp_dbm;
+    double rsrq_db;
+    nr_beam_t beams[MAX_NR_BEAMS];
+} nr_cell_t;
+
+typedef struct {
+    int valid;
+    uint8_t layer;
+    uint32_t nr_arfcn;
+    int has_cc_id;
+    uint8_t cc_id;
+    uint8_t num_cells;
+    uint8_t serving_cell_index;
+    uint16_t serving_pci;
+    uint8_t serving_ssb;
+    uint8_t serving_rsrp_count;
+    double serving_rsrp_dbm[4];
+    int rx_beam[2];
+    uint16_t rfic_id;
+    uint16_t subarray[2];
+    uint8_t cells_count;
+    nr_cell_t cells[MAX_NR_CELLS];
+    uint64_t qts;
+    time_t updated_at;
+} nr_layer_t;
+
+typedef struct {
+    int valid;
     char format[8];
     char path[512];
     size_t bytes;
@@ -296,6 +348,12 @@ typedef struct {
     lte_phy_pusch_t pusch;
     lte_phy_pdsch_t pdsch;
     nr_serving_info_t nr_serving;
+    char nr_ml1_version[16];
+    uint8_t nr_layer_count;
+    uint8_t nr_ssb_periodicity;
+    uint64_t nr_ml1_qts;
+    time_t nr_ml1_updated_at;
+    nr_layer_t nr_layers[MAX_NR_LAYERS];
     combo_state_t lte_combo;
     combo_state_t nr_combo;
 } snapshot_state_t;
@@ -353,6 +411,13 @@ static double rsrq(uint32_t raw) { return -30.0 + (double)raw * 0.0625; }
 static double rssi(uint32_t raw) { return -110.0 + (double)raw * 0.0625; }
 static double snr_lte(uint32_t raw) { return (double)raw * 0.1 - 20.0; }
 
+static double q7_signed(uint32_t raw) {
+    if (raw == 0) return 0.0;
+    uint32_t integer = (raw >> 7) & 0xff;
+    uint32_t frac = raw & 0x7f;
+    return -1.0 * (double)((integer ^ 0xff) + 1) + (double)frac * 0.0078125;
+}
+
 static uint64_t monotonic_ms(void) {
     struct timespec ts;
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
@@ -376,12 +441,14 @@ static void reset_sample_cycle(void) {
     sample_events_seen = 0;
     sample_signal_seen = 0;
     sample_mac_seen = 0;
+    sample_nr_seen = 0;
     sample_started_ms = monotonic_ms();
 }
 
 static int sample_has_enough_data(void) {
     if (require_mode == REQUIRE_ANY) return sample_events_seen > 0;
     if (require_mode == REQUIRE_MAC) return sample_mac_seen;
+    if (require_mode == REQUIRE_NR) return sample_nr_seen;
     if (require_mode == REQUIRE_SIGNAL_MAC) return sample_signal_seen && sample_mac_seen;
     return sample_signal_seen;
 }
@@ -389,6 +456,7 @@ static int sample_has_enough_data(void) {
 static const char *require_mode_name(void) {
     if (require_mode == REQUIRE_ANY) return "any";
     if (require_mode == REQUIRE_MAC) return "mac";
+    if (require_mode == REQUIRE_NR) return "nr";
     if (require_mode == REQUIRE_SIGNAL_MAC) return "signal-mac";
     return "signal";
 }
@@ -744,6 +812,87 @@ static void write_nr_serving(FILE *f) {
             s->pci, s->dl_nr_arfcn, s->ul_nr_arfcn, s->band);
 }
 
+static void write_nullable_int(FILE *f, int value) {
+    if (value < 0) fputs("null", f);
+    else fprintf(f, "%d", value);
+}
+
+static void write_nr_layers(FILE *f) {
+    fputc('[', f);
+    int first_layer = 1;
+    for (int i = 0; i < MAX_NR_LAYERS; i++) {
+        const nr_layer_t *l = &state.nr_layers[i];
+        if (!l->valid) continue;
+        if (!first_layer) fputc(',', f);
+        fprintf(f,
+                "{\"updated_at\":%ld,\"qxdm_ts\":%llu,\"version\":",
+                (long)l->updated_at, (unsigned long long)l->qts);
+        json_string(f, state.nr_ml1_version);
+        fprintf(f,
+                ",\"layer\":%u,\"nr_arfcn\":%u,\"num_cells\":%u,"
+                "\"serving_cell_index\":%u,\"serving_pci\":%u,"
+                "\"serving_ssb\":%u,\"ssb_periodicity\":%u",
+                l->layer, l->nr_arfcn, l->num_cells, l->serving_cell_index,
+                l->serving_pci, l->serving_ssb, state.nr_ssb_periodicity);
+        if (l->has_cc_id) fprintf(f, ",\"cc_id\":%u", l->cc_id);
+        fputs(",\"serving_rsrp_dbm\":[", f);
+        for (uint8_t rx = 0; rx < l->serving_rsrp_count; rx++) {
+            if (rx) fputc(',', f);
+            fprintf(f, "%.2f", l->serving_rsrp_dbm[rx]);
+        }
+        fputs("],\"rx_beam\":[", f);
+        write_nullable_int(f, l->rx_beam[0]);
+        fputc(',', f);
+        write_nullable_int(f, l->rx_beam[1]);
+        fprintf(f, "],\"rfic_id\":%u,\"subarray\":[%u,%u],\"cells\":[",
+                l->rfic_id, l->subarray[0], l->subarray[1]);
+        int first_cell = 1;
+        for (int c = 0; c < MAX_NR_CELLS; c++) {
+            const nr_cell_t *cell = &l->cells[c];
+            if (!cell->valid) continue;
+            if (!first_cell) fputc(',', f);
+            fprintf(f,
+                    "{\"index\":%u,\"pci\":%u,\"pbch_sfn\":%u,"
+                    "\"num_beams\":%u,\"rsrp_dbm\":%.2f,\"rsrq_db\":%.2f,"
+                    "\"beams\":[",
+                    cell->index, cell->pci, cell->pbch_sfn, cell->num_beams,
+                    cell->rsrp_dbm, cell->rsrq_db);
+            int first_beam = 1;
+            for (int b = 0; b < MAX_NR_BEAMS; b++) {
+                const nr_beam_t *beam = &cell->beams[b];
+                if (!beam->valid) continue;
+                if (!first_beam) fputc(',', f);
+                fprintf(f,
+                        "{\"index\":%u,\"ssb_index\":%u,\"rx_beam\":[",
+                        beam->index, beam->ssb_index);
+                write_nullable_int(f, beam->rx_beam[0]);
+                fputc(',', f);
+                write_nullable_int(f, beam->rx_beam[1]);
+                fprintf(f,
+                        "],\"ssb_ref_timing\":%llu,\"rsrp_dbm\":[%.2f,%.2f]",
+                        (unsigned long long)beam->ssb_ref_timing,
+                        beam->rsrp_dbm[0], beam->rsrp_dbm[1]);
+                if (beam->has_rsrq) {
+                    fprintf(f, ",\"rsrq_db\":[%.2f,%.2f]", beam->rsrq_db[0], beam->rsrq_db[1]);
+                }
+                fprintf(f,
+                        ",\"filtered_nr2nr_rsrp_dbm\":%.2f,"
+                        "\"filtered_nr2nr_rsrq_db\":%.2f,"
+                        "\"filtered_l2nr_rsrp_dbm\":%.2f,"
+                        "\"filtered_l2nr_rsrq_db\":%.2f}",
+                        beam->filtered_nr2nr_rsrp_dbm, beam->filtered_nr2nr_rsrq_db,
+                        beam->filtered_l2nr_rsrp_dbm, beam->filtered_l2nr_rsrq_db);
+                first_beam = 0;
+            }
+            fputs("]}", f);
+            first_cell = 0;
+        }
+        fputs("]}", f);
+        first_layer = 0;
+    }
+    fputc(']', f);
+}
+
 static void write_lte_phy(FILE *f) {
     fputs("{\"pusch_tx_candidate\":", f);
     if (state.pusch.valid) {
@@ -851,7 +1000,9 @@ static int write_snapshot(int is_running) {
     write_lte_ca(f);
     fputs("},\"nr\":{\"serving_cell\":", f);
     write_nr_serving(f);
-    fputs(",\"layers\":[],\"ca\":{\"supported_combos\":", f);
+    fputs(",\"layers\":", f);
+    write_nr_layers(f);
+    fputs(",\"ca\":{\"supported_combos\":", f);
     write_combo_state(f, &state.nr_combo);
     fputs("}},\"missing_metrics\":", f);
     write_missing_metrics(f);
@@ -865,10 +1016,12 @@ static int write_snapshot(int is_running) {
     json_string(f, require_mode_name());
     fprintf(f, ",\"sample_events_seen\":%llu,\"sample_signal_seen\":%s,"
             "\"sample_mac_seen\":%s,\"diag_stream_active\":%s,"
+            "\"sample_nr_seen\":%s,"
             "\"gui_lite\":%s,\"nice_increment\":%d,\"last_error\":",
             sample_events_seen, sample_signal_seen ? "true" : "false",
             sample_mac_seen ? "true" : "false",
             log_stream_enabled ? "true" : "false",
+            sample_nr_seen ? "true" : "false",
             opt_gui_lite ? "true" : "false", nice_increment);
     json_string(f, last_error);
     fputs(",\"log_counts\":", f);
@@ -1565,6 +1718,156 @@ static int parse_lte_phy_pdsch_stat_candidate(uint16_t log_id, uint64_t qts, con
     return 1;
 }
 
+static int parse_nr_ml1_meas_database_update(uint16_t log_id, uint64_t qts, const uint8_t *b, size_t len) {
+    (void)log_id;
+    if (len < 6) return 0;
+    uint16_t rel_min = get16(b);
+    uint16_t rel_maj = get16(b + 2);
+    uint8_t num_layers = 0, ssb_periodicity = 0;
+    size_t pos = 0;
+    if (rel_maj == 2 && rel_min == 7) {
+        if (len < 16) return 0;
+        num_layers = b[4];
+        ssb_periodicity = b[5];
+        pos = 16;
+    } else if ((rel_maj == 2 && (rel_min == 9 || rel_min == 10)) ||
+               (rel_maj == 3 && rel_min == 0)) {
+        if (len < 20) return 0;
+        num_layers = b[8];
+        ssb_periodicity = b[9];
+        pos = 20;
+    } else {
+        return 0;
+    }
+
+    memset(state.nr_layers, 0, sizeof(state.nr_layers));
+    snprintf(state.nr_ml1_version, sizeof(state.nr_ml1_version), "%u.%u", rel_maj, rel_min);
+    state.nr_layer_count = num_layers;
+    state.nr_ssb_periodicity = ssb_periodicity;
+    state.nr_ml1_qts = qts;
+    state.nr_ml1_updated_at = time(NULL);
+
+    for (uint8_t layer_index = 0; layer_index < num_layers; layer_index++) {
+        nr_layer_t tmp;
+        memset(&tmp, 0, sizeof(tmp));
+        tmp.valid = layer_index < MAX_NR_LAYERS;
+        tmp.layer = layer_index;
+        tmp.rx_beam[0] = -1;
+        tmp.rx_beam[1] = -1;
+        tmp.qts = qts;
+        tmp.updated_at = state.nr_ml1_updated_at;
+
+        if (rel_maj == 2) {
+            if (pos + 32 > len) break;
+            tmp.nr_arfcn = get32(b + pos);
+            tmp.num_cells = b[pos + 4];
+            tmp.serving_cell_index = b[pos + 5];
+            tmp.serving_pci = get16(b + pos + 6);
+            tmp.serving_ssb = b[pos + 8] & 0x0f;
+            tmp.serving_rsrp_count = 2;
+            tmp.serving_rsrp_dbm[0] = q7_signed(get32(b + pos + 12));
+            tmp.serving_rsrp_dbm[1] = q7_signed(get32(b + pos + 16));
+            uint16_t rx0 = get16(b + pos + 20);
+            uint16_t rx1 = get16(b + pos + 22);
+            tmp.rx_beam[0] = rx0 == 0xffff ? -1 : rx0;
+            tmp.rx_beam[1] = rx1 == 0xffff ? -1 : rx1;
+            tmp.rfic_id = get16(b + pos + 24);
+            tmp.subarray[0] = get16(b + pos + 28);
+            tmp.subarray[1] = get16(b + pos + 30);
+            pos += 32;
+        } else {
+            if (pos + 40 > len) break;
+            tmp.nr_arfcn = get32(b + pos);
+            tmp.has_cc_id = 1;
+            tmp.cc_id = b[pos + 4];
+            tmp.num_cells = b[pos + 5];
+            tmp.serving_pci = get16(b + pos + 6);
+            tmp.serving_cell_index = b[pos + 8];
+            tmp.serving_ssb = b[pos + 9] & 0x0f;
+            tmp.serving_rsrp_count = 4;
+            tmp.serving_rsrp_dbm[0] = q7_signed(get32(b + pos + 12));
+            tmp.serving_rsrp_dbm[1] = q7_signed(get32(b + pos + 16));
+            tmp.serving_rsrp_dbm[2] = q7_signed(get32(b + pos + 20));
+            tmp.serving_rsrp_dbm[3] = q7_signed(get32(b + pos + 24));
+            uint16_t rx0 = get16(b + pos + 28);
+            uint16_t rx1 = get16(b + pos + 30);
+            tmp.rx_beam[0] = rx0 == 0xffff ? -1 : rx0;
+            tmp.rx_beam[1] = rx1 == 0xffff ? -1 : rx1;
+            tmp.rfic_id = get16(b + pos + 32);
+            tmp.subarray[0] = get16(b + pos + 36);
+            tmp.subarray[1] = get16(b + pos + 38);
+            pos += 40;
+        }
+
+        uint8_t n_cells = tmp.num_cells;
+        if (n_cells == 0 || n_cells == 0xff) {
+            n_cells = (tmp.serving_cell_index > 0 && tmp.serving_cell_index < 0xff) ? tmp.serving_cell_index : 0;
+        }
+        for (uint8_t cell_index = 0; cell_index < n_cells; cell_index++) {
+            if (pos + 16 > len) break;
+            uint16_t pci = get16(b + pos);
+            uint16_t pbch_sfn = get16(b + pos + 2);
+            uint8_t num_beams = b[pos + 4];
+            double cell_rsrp = q7_signed(get32(b + pos + 8));
+            double cell_rsrq = q7_signed(get32(b + pos + 12));
+            nr_cell_t *cell = NULL;
+            if (tmp.valid && cell_index < MAX_NR_CELLS) {
+                cell = &tmp.cells[cell_index];
+                cell->valid = 1;
+                cell->index = cell_index;
+                cell->pci = pci;
+                cell->pbch_sfn = pbch_sfn;
+                cell->num_beams = num_beams;
+                cell->rsrp_dbm = cell_rsrp;
+                cell->rsrq_db = cell_rsrq;
+                tmp.cells_count++;
+            }
+            pos += 16;
+
+            size_t beam_size = (rel_maj == 2 && (rel_min == 7 || rel_min == 9)) ? 44 : 84;
+            for (uint8_t beam_index = 0; beam_index < num_beams; beam_index++) {
+                if (pos + beam_size > len) {
+                    pos = len;
+                    break;
+                }
+                if (cell && beam_index < MAX_NR_BEAMS) {
+                    nr_beam_t *beam = &cell->beams[beam_index];
+                    beam->valid = 1;
+                    beam->index = beam_index;
+                    beam->ssb_index = get16(b + pos);
+                    uint16_t brx0 = get16(b + pos + 4);
+                    uint16_t brx1 = get16(b + pos + 6);
+                    beam->rx_beam[0] = brx0 == 0xffff ? -1 : brx0;
+                    beam->rx_beam[1] = brx1 == 0xffff ? -1 : brx1;
+                    beam->ssb_ref_timing = get64(b + pos + 12);
+                    beam->rsrp_dbm[0] = q7_signed(get32(b + pos + 20));
+                    beam->rsrp_dbm[1] = q7_signed(get32(b + pos + 24));
+                    if (beam_size == 44) {
+                        beam->filtered_nr2nr_rsrp_dbm = q7_signed(get32(b + pos + 28));
+                        beam->filtered_nr2nr_rsrq_db = q7_signed(get32(b + pos + 32));
+                        beam->filtered_l2nr_rsrp_dbm = q7_signed(get32(b + pos + 36));
+                        beam->filtered_l2nr_rsrq_db = q7_signed(get32(b + pos + 40));
+                    } else {
+                        beam->has_rsrq = 1;
+                        beam->rsrq_db[0] = q7_signed(get32(b + pos + 28));
+                        beam->rsrq_db[1] = q7_signed(get32(b + pos + 32));
+                        beam->filtered_nr2nr_rsrp_dbm = q7_signed(get32(b + pos + 68));
+                        beam->filtered_nr2nr_rsrq_db = q7_signed(get32(b + pos + 72));
+                        beam->filtered_l2nr_rsrp_dbm = q7_signed(get32(b + pos + 76));
+                        beam->filtered_l2nr_rsrq_db = q7_signed(get32(b + pos + 80));
+                    }
+                }
+                pos += beam_size;
+            }
+        }
+        if (tmp.valid) state.nr_layers[layer_index] = tmp;
+    }
+
+    sample_signal_seen = 1;
+    sample_nr_seen = 1;
+    return 1;
+}
+
 static void parse_log_body(uint16_t log_id, uint64_t qts, const uint8_t *body, size_t body_len) {
     int parsed = 0;
     if (log_id == LOG_LTE_SMEAS) parsed = parse_lte_smeas(log_id, qts, body, body_len);
@@ -1575,6 +1878,7 @@ static void parse_log_body(uint16_t log_id, uint64_t qts, const uint8_t *body, s
     else if (log_id == LOG_LTE_MAC_UL) parsed = parse_lte_mac(log_id, qts, body, body_len, 0);
     else if (log_id == LOG_LTE_PHY_PUSCH_TX_REPORT) parsed = parse_lte_phy_pusch_tx_candidate(log_id, qts, body, body_len);
     else if (log_id == LOG_LTE_PHY_PDSCH_STAT_INDICATION2) parsed = parse_lte_phy_pdsch_stat_candidate(log_id, qts, body, body_len);
+    else if (log_id == LOG_NR_ML1) parsed = parse_nr_ml1_meas_database_update(log_id, qts, body, body_len);
     else if (log_id == LOG_LTE_CA) {
         got_lte = 1;
         write_combo(combo_dir, "b0cd_qlte.hex", body, body_len);
@@ -1642,7 +1946,7 @@ static void usage(const char *argv0) {
         "Usage: %s [--seconds N] [--proc msm|mdm|auto] [--debug] [--raw]\n"
         "          [--mac] [--probe-scheduling] [--probe-phy] [--combo-dir DIR]\n"
         "          [--gui-lite] [--full-logset] [--oneshot]\n"
-        "          [--require any|signal|signal-mac|mac] [--sample-min-ms N]\n"
+        "          [--require any|signal|signal-mac|mac|nr] [--sample-min-ms N]\n"
         "          [--snapshot-file PATH] [--snapshot-interval-ms N]\n"
         "          [--sample-window-ms N] [--nice N]\n"
         "          [--stale-after-ms N] [--no-raw-log] [--max-runtime-sec N]\n"
@@ -1701,6 +2005,7 @@ int main(int argc, char **argv) {
         else if (c == 16) {
             if (!strcmp(optarg, "any")) require_mode = REQUIRE_ANY;
             else if (!strcmp(optarg, "mac")) require_mode = REQUIRE_MAC;
+            else if (!strcmp(optarg, "nr")) require_mode = REQUIRE_NR;
             else if (!strcmp(optarg, "signal-mac")) require_mode = REQUIRE_SIGNAL_MAC;
             else if (!strcmp(optarg, "signal")) require_mode = REQUIRE_SIGNAL;
             else { usage(argv[0]); return 2; }
