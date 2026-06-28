@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Large local reference trees and captures are not part of the handoff repo.
+refs/
+*.qmdl
+*.dlf
+*.hdf
+*.sdm
+*.jsonl
+*.err
+qdiagmdlog/
+qdiag-combos/
+uecapability/
+
+# Local editor and OS noise.
+.DS_Store
+*~

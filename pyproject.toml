@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qdiagparser"
+version = "0.1.0"
+description = "Qualcomm DIAG LTE/NR radio metric parser for Quectel/Foxconn modems"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "GPL-2.0-or-later" }
+authors = [{ name = "T99W373 Research" }]
+dependencies = ["pyserial>=3.5", "pyusb>=1.2"]
+
+[project.scripts]
+qdiagparser = "qdiagparser.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

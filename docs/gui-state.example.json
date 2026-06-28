@@ -1,0 +1,125 @@
+{
+  "combos": {
+    "lte": {
+      "event": "supported_ca_combos_raw",
+      "format": "QLTE",
+      "log_id": "0xB0CD",
+      "payload_hex": "..."
+    },
+    "nr": {
+      "event": "supported_ca_combos_raw",
+      "format": "QNR",
+      "log_id": "0xB826",
+      "payload_hex": "..."
+    }
+  },
+  "lte": {
+    "mac": {
+      "dl": {
+        "cc_id": 0,
+        "direction": "DL",
+        "event": "lte_mac_transport_block",
+        "harq_id": 7,
+        "log_id": "0xB063",
+        "num_sdu": 2,
+        "padding_bytes": 12,
+        "rat": "LTE",
+        "sfn": 917,
+        "subframe": 3,
+        "tbs_bytes": 67
+      },
+      "ul": {
+        "bsr_event": 2,
+        "bsr_trigger": 3,
+        "direction": "UL",
+        "event": "lte_mac_transport_block",
+        "grant": 7,
+        "harq_id": 0,
+        "log_id": "0xB064",
+        "padding_bytes": 0,
+        "rat": "LTE",
+        "rlc_pdus": 1,
+        "sfn": 918,
+        "subframe": 4
+      }
+    },
+    "per_antenna": {
+      "0": {
+        "cell_index": 0,
+        "combined_rsrp_dbm": -62.06,
+        "combined_rsrq_db": -12.12,
+        "earfcn": 525,
+        "event": "per_antenna_measurement",
+        "is_serving_cell": true,
+        "pci": 174,
+        "rat": "LTE",
+        "rsrp_dbm": [-103.19, -105.0, -101.5, -101.56],
+        "rsrq_db": [-17.19, -29.75, -12.75, -12.12],
+        "snr_db": [16.3, 15.3, 14.7, -3.4],
+        "valid_rx": 15
+      }
+    },
+    "phy": {
+      "pusch_tx": {
+        "event": "lte_phy_pusch_tx_candidate",
+        "field_10_raw": 284,
+        "field_34_raw": 0,
+        "field_36_raw": 100,
+        "field_40_raw": 0,
+        "field_42_raw": 0,
+        "field_46_raw": 88,
+        "grant": 7,
+        "log_id": "0xB139",
+        "rat": "LTE",
+        "record_flags_raw": 0,
+        "record_index": 0,
+        "sfn_guess": 486,
+        "subframe_guess": 9,
+        "tti": 4869,
+        "tx_power_raw": -15482
+      }
+    },
+    "serving_cell_measurement": {
+      "avg_rsrp_dbm": -100.94,
+      "earfcn": 525,
+      "event": "serving_cell_measurement",
+      "pci": 174,
+      "rat": "LTE",
+      "rsrp_dbm": -100.88,
+      "rsrq_db": -13.38,
+      "rssi_dbm": -68.44
+    }
+  },
+  "meta": {
+    "events_seen": 0,
+    "started_at": 0,
+    "updated_at": 0
+  },
+  "missing_metrics": {
+    "lte": {
+      "dl_mcs": {"source_candidates": ["LTE 0xB130/0xB132/0xB144/0xB173"], "status": "not_decoded", "value": null},
+      "dl_modulation": {"source_candidates": ["LTE 0xB130/0xB132/0xB144/0xB173"], "status": "not_decoded", "value": null},
+      "dl_rb_alloc": {"source_candidates": ["LTE 0xB126/0xB130/0xB132"], "status": "not_decoded", "value": null},
+      "ul_mcs": {"source_candidates": ["LTE 0xB139/0xB174"], "status": "not_decoded", "value": null},
+      "ul_modulation": {"source_candidates": ["LTE 0xB139/0xB174"], "status": "not_decoded", "value": null},
+      "ul_rb_alloc": {"source_candidates": ["LTE 0xB139/0xB174"], "status": "not_decoded", "value": null}
+    },
+    "nr": {
+      "dl_mcs": {"source_candidates": ["NR MAC/PHY scheduling logs"], "status": "not_decoded", "value": null},
+      "dl_modulation": {"source_candidates": ["NR MAC/PHY scheduling logs"], "status": "not_decoded", "value": null},
+      "dl_rb_alloc": {"source_candidates": ["NR MAC/PHY scheduling logs"], "status": "not_decoded", "value": null},
+      "sinr_db": {"source_candidates": ["NR ML1 measurement/log version mapping"], "status": "not_decoded", "value": null},
+      "ul_mcs": {"source_candidates": ["NR MAC/PHY scheduling logs"], "status": "not_decoded", "value": null},
+      "ul_modulation": {"source_candidates": ["NR MAC/PHY scheduling logs"], "status": "not_decoded", "value": null},
+      "ul_rb_alloc": {"source_candidates": ["NR MAC/PHY scheduling logs"], "status": "not_decoded", "value": null}
+    }
+  },
+  "nr": {
+    "ml1_latest": {
+      "event": "measurement_database_update",
+      "layers": [],
+      "rat": "NR"
+    }
+  },
+  "warnings": []
+}
