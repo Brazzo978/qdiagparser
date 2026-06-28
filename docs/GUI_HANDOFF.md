@@ -10,6 +10,17 @@ Preferred runtime on T99W175-style firmware:
 /tmp/qdiagmon-dci --mac --combo-dir /tmp/qdiag-combos > /tmp/qdiag-live.jsonl 2>/tmp/qdiag-live.err
 ```
 
+Do not use that continuous command directly from a production GUI page. It is for development captures. On the module, DIAG streaming can be CPU-heavy if it is left running.
+
+Preferred GUI sampling policy:
+
+```sh
+QDIAG_SECONDS=2 QDIAG_MAX_AGE=10 QDIAG_MAC=1 QDIAG_PROBE_PHY=0 \
+  /tmp/qdiag-gui-sample.sh > /tmp/qdiag-gui-response.jsonl
+```
+
+This runs a short one-shot capture only when the cache is older than 10 seconds. If multiple page requests arrive together, the sampler returns the cached JSONL instead of starting a second DIAG reader.
+
 For a quick finite capture:
 
 ```sh
@@ -35,6 +46,8 @@ For parser development only, probe extra scheduling candidates:
 These are not guaranteed to contain MCS/RB/modulation. They are a safe next probe set found from SCAT/Qualcomm log names.
 
 `--probe-phy` is the next, more targeted search mode. It enables LTE PHY candidate logs from the local Qualcomm/QXDM golden logmask: `0xB126`, `0xB130`, `0xB132`, `0xB139`, `0xB13C`, `0xB140`, `0xB144`, `0xB16B`, `0xB16D`, `0xB173`, `0xB174`, `0xB175`, `0xB176`, `0xB177`, and `0xB178`. Treat all output as raw evidence until a field offset is proven under load.
+
+Keep `--probe-phy` out of the normal page refresh path. It should be exposed only as an explicit debug capture button because it produces many more events and can raise CPU load.
 
 On a Python-capable host, use the state writer:
 
@@ -167,6 +180,8 @@ The GUI should show `status` text or a muted placeholder. Do not coerce `null` t
 ## Polling Pitfalls
 
 Production dashboard mode should consume normal JSONL, not debug/raw JSONL. `--raw` and `--debug` are useful while developing decoders, but they duplicate parsed events and can grow quickly.
+
+The advanced signals page should not keep `qdiagmon-dci` running permanently. Recommended defaults are a 2 second capture every 10 seconds, with cached results served between captures. Avoid polling faster than 10 seconds unless the user explicitly opens a debug/profiling mode.
 
 The DCI binary emits `qxdm_ts`; the Python parser emits ISO `time`. A GUI or collector should accept either. Prefer `qxdm_ts` for event ordering when present, and mark tiles stale when no fresh event arrives for roughly `2-3` seconds.
 

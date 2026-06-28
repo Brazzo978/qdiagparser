@@ -63,6 +63,16 @@ adb pull /tmp/qdiag-live.jsonl ./qdiag-live.jsonl
 adb pull /tmp/qdiag-combos ./qdiag-combos
 ```
 
+For a WebUI, use the lightweight sampler instead of leaving `qdiagmon-dci` running:
+
+```bash
+adb push scripts/qdiag-gui-sample.sh /tmp/qdiag-gui-sample.sh
+adb shell 'chmod +x /tmp/qdiag-gui-sample.sh'
+adb shell 'QDIAG_SECONDS=2 QDIAG_MAX_AGE=10 QDIAG_MAC=1 /tmp/qdiag-gui-sample.sh'
+```
+
+The sampler serves cached JSONL for 10 seconds and uses a lock so concurrent page requests do not start multiple DIAG captures.
+
 Experimental probe for missing scheduling metrics:
 
 ```bash
