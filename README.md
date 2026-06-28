@@ -52,26 +52,46 @@ PYTHONPATH=src python3 -m qdiagparser capture -d /dev/ttyUSB2 --configure --stop
 
 The modems do not ship `python3`, so the repo also builds native ARM hard-float binaries.
 
-`qdiagmon-dci` is the preferred modem-side runtime when `/dev/diag` and `libdiag.so.1` are present, as on the T99W175. It subscribes with Qualcomm DCI and writes JSONL directly:
+`qdiagmon-dci` is the preferred modem-side runtime when `/dev/diag` and `libdiag.so.1` are present, as on the T99W175. For the WebUI, run it in low-resource snapshot mode: it keeps the latest decoded state in memory and atomically overwrites one small JSON file.
 
 ```bash
 make dci-docker MODEM_SYSROOT="/home/manu/Scrivania/Esim t99/analysis_work/extract/2024_system/rootfs"
 adb push build/qdiagmon-dci-armhf /tmp/qdiagmon-dci
 adb shell 'chmod +x /tmp/qdiagmon-dci'
+adb shell '/tmp/qdiagmon-dci --snapshot-file /tmp/qdiag-state.json \
+  --snapshot-interval-ms 10000 \
+  --no-raw-log \
+  --max-runtime-sec 600 \
+  --mac \
+  --combo-dir /tmp/qdiag-combos >/dev/null 2>/tmp/qdiag-state.err &'
+```
+
+Snapshot mode writes `/tmp/qdiag-state.json.tmp` and renames it over `/tmp/qdiag-state.json`, so the CGI can serve the state without parsing large logs:
+
+```sh
+#!/bin/sh
+printf 'Content-Type: application/json\r\n\r\n'
+cat /tmp/qdiag-state.json 2>/dev/null || \
+  printf '{"updated_at":0,"stale_after_ms":30000,"lte":{"serving_cell":{},"per_antenna":[],"mac":{},"ca":{}},"nr":{"layers":[],"ca":{}},"runtime":{"running":false,"uptime_s":0,"events_seen":0,"last_error":"no snapshot yet"}}\n'
+```
+
+The GUI should poll every 10000 ms and mark data stale after 30000 ms. Do not delete the snapshot after each request; it is intentionally overwritten in place to avoid races and NAND churn.
+
+For development captures, JSONL stream mode is still available:
+
+```bash
 adb shell '/tmp/qdiagmon-dci --seconds 30 --mac --combo-dir /tmp/qdiag-combos > /tmp/qdiag-live.jsonl'
 adb pull /tmp/qdiag-live.jsonl ./qdiag-live.jsonl
 adb pull /tmp/qdiag-combos ./qdiag-combos
 ```
 
-For a WebUI, use the lightweight sampler instead of leaving `qdiagmon-dci` running:
+The shell sampler remains only a fallback for old binaries that do not have `--snapshot-file`:
 
 ```bash
 adb push scripts/qdiag-gui-sample.sh /tmp/qdiag-gui-sample.sh
 adb shell 'chmod +x /tmp/qdiag-gui-sample.sh'
 adb shell 'QDIAG_SECONDS=2 QDIAG_MAX_AGE=10 QDIAG_MAC=1 /tmp/qdiag-gui-sample.sh'
 ```
-
-The sampler serves cached JSONL for 10 seconds and uses a lock so concurrent page requests do not start multiple DIAG captures.
 
 Experimental probe for missing scheduling metrics:
 

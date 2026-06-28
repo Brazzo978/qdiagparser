@@ -86,11 +86,166 @@ extern int diag_disable_console;
 static volatile sig_atomic_t running = 1;
 static int opt_debug = 0;
 static int opt_raw = 0;
+static int opt_no_raw_log = 0;
+static int opt_stream_json = 1;
 static int opt_probe_scheduling = 0;
 static int opt_probe_phy = 0;
 static const char *combo_dir = NULL;
+static const char *snapshot_file = NULL;
+static int snapshot_interval_ms = 10000;
+static int stale_after_ms = 30000;
 static int got_lte = 0;
 static int got_nr = 0;
+static time_t runtime_start = 0;
+static unsigned long long events_seen = 0;
+static char last_error[160] = "";
+
+#define MAX_LTE_ANTENNA_CELLS 8
+#define MAX_LTE_CC 8
+
+typedef struct {
+    int valid;
+    uint8_t version;
+    uint8_t rrc_release;
+    uint32_t earfcn;
+    uint16_t pci;
+    double rsrp_dbm;
+    double avg_rsrp_dbm;
+    double rssi_dbm;
+    double rsrq_db;
+    double avg_rsrq_db;
+    uint64_t qts;
+    time_t updated_at;
+} lte_serving_measurement_t;
+
+typedef struct {
+    int valid;
+    uint8_t version;
+    uint32_t earfcn;
+    uint32_t cell_index;
+    uint32_t valid_rx;
+    uint32_t rx_map;
+    uint16_t pci;
+    uint16_t serving_cell_index;
+    int is_serving_cell;
+    uint16_t sfn;
+    uint8_t subframe;
+    double rsrp_dbm[4];
+    double combined_rsrp_dbm;
+    double filtered_rsrp_dbm;
+    double rsrq_db[4];
+    double combined_rsrq_db;
+    double filtered_rsrq_db;
+    double rssi_dbm[4];
+    double combined_rssi_dbm;
+    double snr_db[4];
+    double projected_sir_db;
+    double post_ic_rsrq_db;
+    int32_t cinr_raw[4];
+    uint64_t qts;
+    time_t updated_at;
+} lte_per_antenna_t;
+
+typedef struct {
+    int valid;
+    uint8_t version;
+    uint16_t pci;
+    uint32_t dl_earfcn;
+    uint32_t ul_earfcn;
+    uint32_t band;
+    uint16_t dl_bandwidth_prb;
+    uint16_t ul_bandwidth_prb;
+    uint32_t cell_id;
+    uint16_t tac;
+    uint16_t mcc;
+    char mnc[8];
+    uint64_t qts;
+    time_t updated_at;
+} lte_serving_info_t;
+
+typedef struct {
+    int valid;
+    uint8_t version;
+    uint8_t cc_id;
+    uint16_t sfn;
+    uint8_t subframe;
+    uint8_t rnti_type;
+    uint8_t harq_id;
+    uint32_t tbs_bytes;
+    uint32_t padding_bytes;
+    uint8_t num_sdu;
+    uint8_t num_lcid;
+    uint64_t qts;
+    time_t updated_at;
+} lte_mac_dl_t;
+
+typedef struct {
+    int valid;
+    uint8_t version;
+    uint8_t cc_id;
+    uint16_t sfn;
+    uint8_t subframe;
+    uint8_t rnti_type;
+    uint8_t harq_id;
+    uint16_t grant;
+    uint8_t rlc_pdus;
+    uint16_t padding_bytes;
+    uint8_t bsr_event;
+    uint8_t bsr_trigger;
+    uint64_t qts;
+    time_t updated_at;
+} lte_mac_ul_t;
+
+typedef struct {
+    int valid;
+    uint16_t tti;
+    uint16_t sfn_guess;
+    uint8_t subframe_guess;
+    uint16_t grant;
+    int16_t tx_power_raw;
+    uint16_t field_10_raw;
+    uint16_t field_34_raw;
+    uint16_t field_36_raw;
+    uint16_t field_40_raw;
+    uint16_t field_42_raw;
+    uint16_t field_46_raw;
+    uint64_t qts;
+    time_t updated_at;
+} lte_phy_pusch_t;
+
+typedef struct {
+    int valid;
+    char version[16];
+    uint16_t pci;
+    uint32_t dl_nr_arfcn;
+    uint32_t ul_nr_arfcn;
+    uint16_t band;
+    uint64_t qts;
+    time_t updated_at;
+} nr_serving_info_t;
+
+typedef struct {
+    int valid;
+    char format[8];
+    char path[512];
+    size_t bytes;
+    uint64_t qts;
+    time_t updated_at;
+} combo_state_t;
+
+typedef struct {
+    lte_serving_measurement_t lte_serving;
+    lte_serving_info_t lte_info;
+    lte_per_antenna_t lte_ant[MAX_LTE_ANTENNA_CELLS];
+    lte_mac_dl_t mac_dl[MAX_LTE_CC];
+    lte_mac_ul_t mac_ul[MAX_LTE_CC];
+    lte_phy_pusch_t pusch;
+    nr_serving_info_t nr_serving;
+    combo_state_t lte_combo;
+    combo_state_t nr_combo;
+} snapshot_state_t;
+
+static snapshot_state_t state;
 
 static uint16_t get16(const uint8_t *p) {
     return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
@@ -108,6 +263,66 @@ static double rsrp(uint32_t raw) { return -180.0 + (double)raw * 0.0625; }
 static double rsrq(uint32_t raw) { return -30.0 + (double)raw * 0.0625; }
 static double rssi(uint32_t raw) { return -110.0 + (double)raw * 0.0625; }
 static double snr_lte(uint32_t raw) { return (double)raw * 0.1 - 20.0; }
+
+static uint64_t monotonic_ms(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
+}
+
+static void set_last_error(const char *msg) {
+    if (!msg) msg = "";
+    snprintf(last_error, sizeof(last_error), "%s", msg);
+}
+
+static int lte_ant_slot(uint32_t earfcn, uint16_t pci, uint32_t cell_index) {
+    int free_slot = -1;
+    for (int i = 0; i < MAX_LTE_ANTENNA_CELLS; i++) {
+        if (!state.lte_ant[i].valid) {
+            if (free_slot < 0) free_slot = i;
+            continue;
+        }
+        if (state.lte_ant[i].earfcn == earfcn &&
+            state.lte_ant[i].pci == pci &&
+            state.lte_ant[i].cell_index == cell_index) return i;
+    }
+    return free_slot >= 0 ? free_slot : (int)(cell_index % MAX_LTE_ANTENNA_CELLS);
+}
+
+static uint8_t cc_slot(uint8_t cc_id) {
+    return cc_id < MAX_LTE_CC ? cc_id : (uint8_t)(cc_id % MAX_LTE_CC);
+}
+
+static void json_string(FILE *f, const char *s) {
+    fputc('"', f);
+    if (s) {
+        for (; *s; s++) {
+            unsigned char c = (unsigned char)*s;
+            if (c == '"' || c == '\\') {
+                fputc('\\', f);
+                fputc(c, f);
+            } else if (c == '\n') {
+                fputs("\\n", f);
+            } else if (c == '\r') {
+                fputs("\\r", f);
+            } else if (c == '\t') {
+                fputs("\\t", f);
+            } else if (c < 0x20) {
+                fprintf(f, "\\u%04x", c);
+            } else {
+                fputc(c, f);
+            }
+        }
+    }
+    fputc('"', f);
+}
+
+static void combo_path(char *out, size_t out_len, const char *name) {
+    if (!out_len) return;
+    out[0] = '\0';
+    if (!combo_dir) return;
+    snprintf(out, out_len, "%s/%s", combo_dir, name);
+}
 
 static uint32_t getbits32(const uint32_t *words, size_t n_words, unsigned int start, unsigned int len) {
     if (!len || len > 32) return 0;
@@ -157,6 +372,242 @@ static void write_combo(const char *dir, const char *name, const uint8_t *body, 
     hexprint(f, body, len);
     fputc('\n', f);
     fclose(f);
+}
+
+static void write_cc_ids(FILE *f, int *count_out) {
+    int first = 1, count = 0;
+    fputc('[', f);
+    for (int i = 0; i < MAX_LTE_CC; i++) {
+        if (!state.mac_dl[i].valid && !state.mac_ul[i].valid) continue;
+        if (!first) fputc(',', f);
+        fprintf(f, "%d", i);
+        first = 0;
+        count++;
+    }
+    fputc(']', f);
+    if (count_out) *count_out = count;
+}
+
+static void write_lte_serving(FILE *f) {
+    if (!state.lte_serving.valid) {
+        fputs("{}", f);
+        return;
+    }
+    const lte_serving_measurement_t *s = &state.lte_serving;
+    fprintf(f,
+            "{\"updated_at\":%ld,\"qxdm_ts\":%llu,\"version\":%u,"
+            "\"rrc_release\":%u,\"earfcn\":%u,\"pci\":%u,"
+            "\"rsrp_dbm\":%.2f,\"avg_rsrp_dbm\":%.2f,"
+            "\"rssi_dbm\":%.2f,\"rsrq_db\":%.2f,\"avg_rsrq_db\":%.2f}",
+            (long)s->updated_at, (unsigned long long)s->qts, s->version,
+            s->rrc_release, s->earfcn, s->pci, s->rsrp_dbm,
+            s->avg_rsrp_dbm, s->rssi_dbm, s->rsrq_db, s->avg_rsrq_db);
+}
+
+static void write_lte_serving_info(FILE *f) {
+    if (!state.lte_info.valid) {
+        fputs("{}", f);
+        return;
+    }
+    const lte_serving_info_t *s = &state.lte_info;
+    fprintf(f,
+            "{\"updated_at\":%ld,\"qxdm_ts\":%llu,\"version\":%u,"
+            "\"pci\":%u,\"dl_earfcn\":%u,\"ul_earfcn\":%u,\"band\":%u,"
+            "\"dl_bandwidth_prb\":%u,\"ul_bandwidth_prb\":%u,"
+            "\"cell_id\":%u,\"tac\":%u,\"mcc\":%u,\"mnc\":",
+            (long)s->updated_at, (unsigned long long)s->qts, s->version,
+            s->pci, s->dl_earfcn, s->ul_earfcn, s->band, s->dl_bandwidth_prb,
+            s->ul_bandwidth_prb, s->cell_id, s->tac, s->mcc);
+    json_string(f, s->mnc);
+    fputc('}', f);
+}
+
+static void write_lte_per_antenna(FILE *f) {
+    int first = 1;
+    fputc('[', f);
+    for (int i = 0; i < MAX_LTE_ANTENNA_CELLS; i++) {
+        const lte_per_antenna_t *a = &state.lte_ant[i];
+        if (!a->valid) continue;
+        if (!first) fputc(',', f);
+        fprintf(f,
+                "{\"updated_at\":%ld,\"qxdm_ts\":%llu,\"version\":%u,"
+                "\"earfcn\":%u,\"cell_index\":%u,\"valid_rx\":%u,"
+                "\"rx_map\":%u,\"pci\":%u,\"serving_cell_index\":%u,"
+                "\"is_serving_cell\":%s,\"sfn\":%u,\"subframe\":%u,"
+                "\"rsrp_dbm\":[%.2f,%.2f,%.2f,%.2f],"
+                "\"combined_rsrp_dbm\":%.2f,\"filtered_rsrp_dbm\":%.2f,"
+                "\"rsrq_db\":[%.2f,%.2f,%.2f,%.2f],"
+                "\"combined_rsrq_db\":%.2f,\"filtered_rsrq_db\":%.2f,"
+                "\"rssi_dbm\":[%.2f,%.2f,%.2f,%.2f],"
+                "\"combined_rssi_dbm\":%.2f,"
+                "\"snr_db\":[%.2f,%.2f,%.2f,%.2f],"
+                "\"projected_sir_db\":%.2f,\"post_ic_rsrq_db\":%.2f,"
+                "\"cinr_raw\":[%d,%d,%d,%d]}",
+                (long)a->updated_at, (unsigned long long)a->qts, a->version,
+                a->earfcn, a->cell_index, a->valid_rx, a->rx_map, a->pci,
+                a->serving_cell_index, a->is_serving_cell ? "true" : "false",
+                a->sfn, a->subframe, a->rsrp_dbm[0], a->rsrp_dbm[1],
+                a->rsrp_dbm[2], a->rsrp_dbm[3], a->combined_rsrp_dbm,
+                a->filtered_rsrp_dbm, a->rsrq_db[0], a->rsrq_db[1],
+                a->rsrq_db[2], a->rsrq_db[3], a->combined_rsrq_db,
+                a->filtered_rsrq_db, a->rssi_dbm[0], a->rssi_dbm[1],
+                a->rssi_dbm[2], a->rssi_dbm[3], a->combined_rssi_dbm,
+                a->snr_db[0], a->snr_db[1], a->snr_db[2], a->snr_db[3],
+                a->projected_sir_db, a->post_ic_rsrq_db, a->cinr_raw[0],
+                a->cinr_raw[1], a->cinr_raw[2], a->cinr_raw[3]);
+        first = 0;
+    }
+    fputc(']', f);
+}
+
+static void write_lte_mac(FILE *f) {
+    fputs("{\"dl_by_cc\":", f);
+    fputc('[', f);
+    int first = 1;
+    for (int i = 0; i < MAX_LTE_CC; i++) {
+        const lte_mac_dl_t *m = &state.mac_dl[i];
+        if (!m->valid) continue;
+        if (!first) fputc(',', f);
+        fprintf(f,
+                "{\"updated_at\":%ld,\"qxdm_ts\":%llu,\"version\":%u,"
+                "\"cc_id\":%u,\"sfn\":%u,\"subframe\":%u,"
+                "\"rnti_type\":%u,\"harq_id\":%u,\"tbs_bytes\":%u,"
+                "\"padding_bytes\":%u,\"num_sdu\":%u,\"num_lcid\":%u}",
+                (long)m->updated_at, (unsigned long long)m->qts, m->version,
+                m->cc_id, m->sfn, m->subframe, m->rnti_type, m->harq_id,
+                m->tbs_bytes, m->padding_bytes, m->num_sdu, m->num_lcid);
+        first = 0;
+    }
+    fputs("],\"ul_by_cc\":", f);
+    fputc('[', f);
+    first = 1;
+    for (int i = 0; i < MAX_LTE_CC; i++) {
+        const lte_mac_ul_t *m = &state.mac_ul[i];
+        if (!m->valid) continue;
+        if (!first) fputc(',', f);
+        fprintf(f,
+                "{\"updated_at\":%ld,\"qxdm_ts\":%llu,\"version\":%u,"
+                "\"cc_id\":%u,\"sfn\":%u,\"subframe\":%u,"
+                "\"rnti_type\":%u,\"harq_id\":%u,\"grant\":%u,"
+                "\"rlc_pdus\":%u,\"padding_bytes\":%u,"
+                "\"bsr_event\":%u,\"bsr_trigger\":%u}",
+                (long)m->updated_at, (unsigned long long)m->qts, m->version,
+                m->cc_id, m->sfn, m->subframe, m->rnti_type, m->harq_id,
+                m->grant, m->rlc_pdus, m->padding_bytes, m->bsr_event,
+                m->bsr_trigger);
+        first = 0;
+    }
+    fputs("],\"phy_pusch_tx\":", f);
+    if (state.pusch.valid) {
+        const lte_phy_pusch_t *p = &state.pusch;
+        fprintf(f,
+                "{\"updated_at\":%ld,\"qxdm_ts\":%llu,\"tti\":%u,"
+                "\"sfn_guess\":%u,\"subframe_guess\":%u,\"grant\":%u,"
+                "\"tx_power_raw\":%d,\"field_10_raw\":%u,"
+                "\"field_34_raw\":%u,\"field_36_raw\":%u,"
+                "\"field_40_raw\":%u,\"field_42_raw\":%u,"
+                "\"field_46_raw\":%u}",
+                (long)p->updated_at, (unsigned long long)p->qts, p->tti,
+                p->sfn_guess, p->subframe_guess, p->grant, p->tx_power_raw,
+                p->field_10_raw, p->field_34_raw, p->field_36_raw,
+                p->field_40_raw, p->field_42_raw, p->field_46_raw);
+    } else {
+        fputs("{}", f);
+    }
+    fputc('}', f);
+}
+
+static void write_combo_state(FILE *f, const combo_state_t *c) {
+    if (!c->valid) {
+        fputs("{}", f);
+        return;
+    }
+    fprintf(f, "{\"updated_at\":%ld,\"qxdm_ts\":%llu,\"format\":",
+            (long)c->updated_at, (unsigned long long)c->qts);
+    json_string(f, c->format);
+    fprintf(f, ",\"bytes\":%zu", c->bytes);
+    if (c->path[0]) {
+        fputs(",\"file\":", f);
+        json_string(f, c->path);
+    }
+    fputc('}', f);
+}
+
+static void write_lte_ca(FILE *f) {
+    int cc_count = 0;
+    fputs("{\"observed_cc_ids\":", f);
+    write_cc_ids(f, &cc_count);
+    fprintf(f, ",\"observed_component_count\":%d,\"supported_combos\":", cc_count);
+    write_combo_state(f, &state.lte_combo);
+    fputc('}', f);
+}
+
+static void write_nr_serving(FILE *f) {
+    if (!state.nr_serving.valid) {
+        fputs("{}", f);
+        return;
+    }
+    const nr_serving_info_t *s = &state.nr_serving;
+    fprintf(f, "{\"updated_at\":%ld,\"qxdm_ts\":%llu,\"version\":",
+            (long)s->updated_at, (unsigned long long)s->qts);
+    json_string(f, s->version);
+    fprintf(f,
+            ",\"pci\":%u,\"dl_nr_arfcn\":%u,\"ul_nr_arfcn\":%u,\"band\":%u}",
+            s->pci, s->dl_nr_arfcn, s->ul_nr_arfcn, s->band);
+}
+
+static int write_snapshot(int is_running) {
+    if (!snapshot_file) return 0;
+    char tmp[512];
+    int n = snprintf(tmp, sizeof(tmp), "%s.tmp", snapshot_file);
+    if (n < 0 || (size_t)n >= sizeof(tmp)) {
+        set_last_error("snapshot path too long");
+        return -1;
+    }
+    FILE *f = fopen(tmp, "w");
+    if (!f) {
+        snprintf(last_error, sizeof(last_error), "open snapshot tmp failed errno=%d", errno);
+        return -1;
+    }
+
+    time_t now = time(NULL);
+    long uptime = runtime_start ? (long)(now - runtime_start) : 0;
+    fprintf(f, "{\"updated_at\":%ld,\"stale_after_ms\":%d,\"lte\":{",
+            (long)now, stale_after_ms);
+    fputs("\"serving_cell\":", f);
+    write_lte_serving(f);
+    fputs(",\"serving_info\":", f);
+    write_lte_serving_info(f);
+    fputs(",\"per_antenna\":", f);
+    write_lte_per_antenna(f);
+    fputs(",\"mac\":", f);
+    write_lte_mac(f);
+    fputs(",\"ca\":", f);
+    write_lte_ca(f);
+    fputs("},\"nr\":{\"serving_cell\":", f);
+    write_nr_serving(f);
+    fputs(",\"layers\":[],\"ca\":{\"supported_combos\":", f);
+    write_combo_state(f, &state.nr_combo);
+    fputs("}},\"runtime\":{\"running\":", f);
+    fputs(is_running ? "true" : "false", f);
+    fprintf(f, ",\"uptime_s\":%ld,\"events_seen\":%llu,\"last_error\":",
+            uptime, events_seen);
+    json_string(f, last_error);
+    fputs("}}\n", f);
+
+    if (fflush(f) != 0) {
+        snprintf(last_error, sizeof(last_error), "flush snapshot failed errno=%d", errno);
+    }
+    fsync(fileno(f));
+    if (fclose(f) != 0) {
+        snprintf(last_error, sizeof(last_error), "close snapshot failed errno=%d", errno);
+        return -1;
+    }
+    if (rename(tmp, snapshot_file) != 0) {
+        snprintf(last_error, sizeof(last_error), "rename snapshot failed errno=%d", errno);
+        return -1;
+    }
+    return 0;
 }
 
 static int is_probe_scheduling_log(uint16_t log_id) {
@@ -219,14 +670,31 @@ static int parse_lte_smeas(uint16_t log_id, uint64_t qts, const uint8_t *b, size
         rsrq_word = get32(b + 20);
         rssi_word = get32(b + 24);
     } else return 0;
-    json_prefix(log_id, qts, "LTE", "serving_cell_measurement");
-    printf(",\"version\":%u,\"rrc_release\":%u,\"earfcn\":%u,\"pci\":%u,"
-           "\"rsrp_dbm\":%.2f,\"avg_rsrp_dbm\":%.2f,\"rssi_dbm\":%.2f,"
-           "\"rsrq_db\":%.2f,\"avg_rsrq_db\":%.2f}\n",
-           ver, rrc, earfcn, pci_prio & 0x1ff,
-           rsrp(meas_rsrp & 0xfff), rsrp(avg_rsrp & 0xfff),
-           rssi((rssi_word >> 10) & 0x7ff), rsrq(rsrq_word & 0x3ff),
-           rsrq((rsrq_word >> 20) & 0x3ff));
+    double v_rsrp = rsrp(meas_rsrp & 0xfff);
+    double v_avg_rsrp = rsrp(avg_rsrp & 0xfff);
+    double v_rssi = rssi((rssi_word >> 10) & 0x7ff);
+    double v_rsrq = rsrq(rsrq_word & 0x3ff);
+    double v_avg_rsrq = rsrq((rsrq_word >> 20) & 0x3ff);
+    state.lte_serving.valid = 1;
+    state.lte_serving.version = ver;
+    state.lte_serving.rrc_release = rrc;
+    state.lte_serving.earfcn = earfcn;
+    state.lte_serving.pci = pci_prio & 0x1ff;
+    state.lte_serving.rsrp_dbm = v_rsrp;
+    state.lte_serving.avg_rsrp_dbm = v_avg_rsrp;
+    state.lte_serving.rssi_dbm = v_rssi;
+    state.lte_serving.rsrq_db = v_rsrq;
+    state.lte_serving.avg_rsrq_db = v_avg_rsrq;
+    state.lte_serving.qts = qts;
+    state.lte_serving.updated_at = time(NULL);
+    if (opt_stream_json) {
+        json_prefix(log_id, qts, "LTE", "serving_cell_measurement");
+        printf(",\"version\":%u,\"rrc_release\":%u,\"earfcn\":%u,\"pci\":%u,"
+               "\"rsrp_dbm\":%.2f,\"avg_rsrp_dbm\":%.2f,\"rssi_dbm\":%.2f,"
+               "\"rsrq_db\":%.2f,\"avg_rsrq_db\":%.2f}\n",
+               ver, rrc, earfcn, pci_prio & 0x1ff, v_rsrp, v_avg_rsrp,
+               v_rssi, v_rsrq, v_avg_rsrq);
+    }
     return 1;
 }
 
@@ -275,34 +743,94 @@ static int parse_lte_smeas_resp(uint16_t log_id, uint64_t qts, const uint8_t *b,
                 int32_t cinr1 = (int32_t)get32(cell + cinr_offset + 12);
                 int32_t cinr2 = (int32_t)get32(cell + cinr_offset + 16);
                 int32_t cinr3 = (int32_t)get32(cell + cinr_offset + 20);
-                json_prefix(log_id, qts, "LTE", "per_antenna_measurement");
-                printf(",\"version\":%u,\"earfcn\":%u,\"cell_index\":%u,\"valid_rx\":%u,\"rx_map\":%u,"
-                       "\"pci\":%u,\"serving_cell_index\":%u,\"is_serving_cell\":%s,"
-                       "\"sfn\":%u,\"subframe\":%u,"
-                       "\"rsrp_dbm\":[%.2f,%.2f,%.2f,%.2f],"
-                       "\"combined_rsrp_dbm\":%.2f,\"filtered_rsrp_dbm\":%.2f,"
-                       "\"rsrq_db\":[%.2f,%.2f,%.2f,%.2f],"
-                       "\"combined_rsrq_db\":%.2f,\"filtered_rsrq_db\":%.2f,"
-                       "\"rssi_dbm\":[%.2f,%.2f,%.2f,%.2f],\"combined_rssi_dbm\":%.2f,"
-                       "\"snr_db\":[%.2f,%.2f,%.2f,%.2f],"
-                       "\"projected_sir_db\":%.2f,\"post_ic_rsrq_db\":%.2f,"
-                       "\"cinr_raw\":[%d,%d,%d,%d]}\n",
-                       sub_ver, earfcn, idx, valid_rx, rx_map,
-                       meta0 & 0x1ff, (meta0 >> 9) & 7, (meta0 & 0x1000) ? "true" : "false",
-                       meta2 & 0x3ff, (meta2 >> 10) & 0xf,
-                       rsrp(getbits32(words, 12, 10, 12)), rsrp(getbits32(words, 12, 44, 12)),
-                       rsrp(getbits32(words, 12, 76, 12)), rsrp(getbits32(words, 12, 96, 12)),
-                       rsrp(getbits32(words, 12, 108, 12)) + 40.0, rsrp(getbits32(words, 12, 140, 12)),
-                       rsrq(getbits32(words, 12, 160, 10)), rsrq(getbits32(words, 12, 180, 10)),
-                       rsrq(getbits32(words, 12, 202, 10)), rsrq(getbits32(words, 12, 212, 10)),
-                       rsrq(getbits32(words, 12, 224, 10)), rsrq(getbits32(words, 12, 244, 10)),
-                       rssi(getbits32(words, 12, 256, 11)), rssi(getbits32(words, 12, 267, 11)),
-                       rssi(getbits32(words, 12, 288, 11)), rssi(getbits32(words, 12, 299, 11)),
-                       rssi(getbits32(words, 12, 320, 11)),
-                       snr_lte(getbits32(snr_words, 2, 0, 9)), snr_lte(getbits32(snr_words, 2, 9, 9)),
-                       snr_lte(getbits32(snr_words, 2, 32, 9)), snr_lte(getbits32(snr_words, 2, 42, 8)),
-                       (double)prj_sir / 16.0, (double)post_ic_rsrq * 0.0625 - 30.0,
-                       cinr0, cinr1, cinr2, cinr3);
+                double v_rsrp[4] = {
+                    rsrp(getbits32(words, 12, 10, 12)),
+                    rsrp(getbits32(words, 12, 44, 12)),
+                    rsrp(getbits32(words, 12, 76, 12)),
+                    rsrp(getbits32(words, 12, 96, 12))
+                };
+                double v_combined_rsrp = rsrp(getbits32(words, 12, 108, 12)) + 40.0;
+                double v_filtered_rsrp = rsrp(getbits32(words, 12, 140, 12));
+                double v_rsrq[4] = {
+                    rsrq(getbits32(words, 12, 160, 10)),
+                    rsrq(getbits32(words, 12, 180, 10)),
+                    rsrq(getbits32(words, 12, 202, 10)),
+                    rsrq(getbits32(words, 12, 212, 10))
+                };
+                double v_combined_rsrq = rsrq(getbits32(words, 12, 224, 10));
+                double v_filtered_rsrq = rsrq(getbits32(words, 12, 244, 10));
+                double v_rssi[4] = {
+                    rssi(getbits32(words, 12, 256, 11)),
+                    rssi(getbits32(words, 12, 267, 11)),
+                    rssi(getbits32(words, 12, 288, 11)),
+                    rssi(getbits32(words, 12, 299, 11))
+                };
+                double v_combined_rssi = rssi(getbits32(words, 12, 320, 11));
+                double v_snr[4] = {
+                    snr_lte(getbits32(snr_words, 2, 0, 9)),
+                    snr_lte(getbits32(snr_words, 2, 9, 9)),
+                    snr_lte(getbits32(snr_words, 2, 32, 9)),
+                    snr_lte(getbits32(snr_words, 2, 42, 8))
+                };
+                double v_projected_sir = (double)prj_sir / 16.0;
+                double v_post_ic_rsrq = (double)post_ic_rsrq * 0.0625 - 30.0;
+                int slot = lte_ant_slot(earfcn, meta0 & 0x1ff, idx);
+                lte_per_antenna_t *a = &state.lte_ant[slot];
+                memset(a, 0, sizeof(*a));
+                a->valid = 1;
+                a->version = sub_ver;
+                a->earfcn = earfcn;
+                a->cell_index = idx;
+                a->valid_rx = valid_rx;
+                a->rx_map = rx_map;
+                a->pci = meta0 & 0x1ff;
+                a->serving_cell_index = (meta0 >> 9) & 7;
+                a->is_serving_cell = (meta0 & 0x1000) ? 1 : 0;
+                a->sfn = meta2 & 0x3ff;
+                a->subframe = (meta2 >> 10) & 0xf;
+                for (int rx = 0; rx < 4; rx++) {
+                    a->rsrp_dbm[rx] = v_rsrp[rx];
+                    a->rsrq_db[rx] = v_rsrq[rx];
+                    a->rssi_dbm[rx] = v_rssi[rx];
+                    a->snr_db[rx] = v_snr[rx];
+                }
+                a->combined_rsrp_dbm = v_combined_rsrp;
+                a->filtered_rsrp_dbm = v_filtered_rsrp;
+                a->combined_rsrq_db = v_combined_rsrq;
+                a->filtered_rsrq_db = v_filtered_rsrq;
+                a->combined_rssi_dbm = v_combined_rssi;
+                a->projected_sir_db = v_projected_sir;
+                a->post_ic_rsrq_db = v_post_ic_rsrq;
+                a->cinr_raw[0] = cinr0;
+                a->cinr_raw[1] = cinr1;
+                a->cinr_raw[2] = cinr2;
+                a->cinr_raw[3] = cinr3;
+                a->qts = qts;
+                a->updated_at = time(NULL);
+                if (opt_stream_json) {
+                    json_prefix(log_id, qts, "LTE", "per_antenna_measurement");
+                    printf(",\"version\":%u,\"earfcn\":%u,\"cell_index\":%u,\"valid_rx\":%u,\"rx_map\":%u,"
+                           "\"pci\":%u,\"serving_cell_index\":%u,\"is_serving_cell\":%s,"
+                           "\"sfn\":%u,\"subframe\":%u,"
+                           "\"rsrp_dbm\":[%.2f,%.2f,%.2f,%.2f],"
+                           "\"combined_rsrp_dbm\":%.2f,\"filtered_rsrp_dbm\":%.2f,"
+                           "\"rsrq_db\":[%.2f,%.2f,%.2f,%.2f],"
+                           "\"combined_rsrq_db\":%.2f,\"filtered_rsrq_db\":%.2f,"
+                           "\"rssi_dbm\":[%.2f,%.2f,%.2f,%.2f],\"combined_rssi_dbm\":%.2f,"
+                           "\"snr_db\":[%.2f,%.2f,%.2f,%.2f],"
+                           "\"projected_sir_db\":%.2f,\"post_ic_rsrq_db\":%.2f,"
+                           "\"cinr_raw\":[%d,%d,%d,%d]}\n",
+                           sub_ver, earfcn, idx, valid_rx, rx_map,
+                           meta0 & 0x1ff, (meta0 >> 9) & 7, (meta0 & 0x1000) ? "true" : "false",
+                           meta2 & 0x3ff, (meta2 >> 10) & 0xf,
+                           v_rsrp[0], v_rsrp[1], v_rsrp[2], v_rsrp[3],
+                           v_combined_rsrp, v_filtered_rsrp,
+                           v_rsrq[0], v_rsrq[1], v_rsrq[2], v_rsrq[3],
+                           v_combined_rsrq, v_filtered_rsrq,
+                           v_rssi[0], v_rssi[1], v_rssi[2], v_rssi[3],
+                           v_combined_rssi, v_snr[0], v_snr[1], v_snr[2], v_snr[3],
+                           v_projected_sir, v_post_ic_rsrq, cinr0, cinr1, cinr2, cinr3);
+                }
                 parsed = 1;
             }
         } else if (sub_ver == 59 && sub_len >= 16) {
@@ -317,23 +845,28 @@ static int parse_lte_smeas_resp(uint16_t log_id, uint64_t qts, const uint8_t *b,
                 uint16_t meta0 = get16(sub + cell_pos);
                 uint16_t meta1 = get16(sub + cell_pos + 2);
                 uint16_t meta2 = get16(sub + cell_pos + 4);
-                json_prefix(log_id, qts, "LTE", "per_antenna_measurement_raw");
-                printf(",\"version\":%u,\"earfcn\":%u,\"cell_index\":%u,\"valid_rx\":%u,"
-                       "\"rx_map\":%u,\"pci_guess\":%u,\"serving_cell_index_guess\":%u,"
-                       "\"is_serving_cell_guess\":%s,\"meta_words\":[%u,%u,%u],\"cell_hex\":\"",
-                       sub_ver, earfcn, idx, valid_rx, rx_map, meta0 & 0x1ff,
-                       (meta0 >> 9) & 7, (meta0 & 0x1000) ? "true" : "false",
-                       meta0, meta1, meta2);
-                hexprint(stdout, sub + cell_pos, have);
-                printf("\"}\n");
+                (void)meta1;
+                if (opt_stream_json) {
+                    json_prefix(log_id, qts, "LTE", "per_antenna_measurement_raw");
+                    printf(",\"version\":%u,\"earfcn\":%u,\"cell_index\":%u,\"valid_rx\":%u,"
+                           "\"rx_map\":%u,\"pci_guess\":%u,\"serving_cell_index_guess\":%u,"
+                           "\"is_serving_cell_guess\":%s,\"meta_words\":[%u,%u,%u],\"cell_hex\":\"",
+                           sub_ver, earfcn, idx, valid_rx, rx_map, meta0 & 0x1ff,
+                           (meta0 >> 9) & 7, (meta0 & 0x1000) ? "true" : "false",
+                           meta0, meta1, meta2);
+                    hexprint(stdout, sub + cell_pos, have);
+                    printf("\"}\n");
+                }
                 parsed = 1;
             }
         } else if (opt_debug) {
-            json_prefix(log_id, qts, "LTE", "per_antenna_measurement_unknown");
-            printf(",\"subpacket_id\":%u,\"subpacket_version\":%u,\"subpacket_size\":%u,\"payload_hex\":\"",
-                   sub_id, sub_ver, sub_size);
-            hexprint(stdout, sub, sub_len < 192 ? sub_len : 192);
-            printf("\"}\n");
+            if (opt_stream_json) {
+                json_prefix(log_id, qts, "LTE", "per_antenna_measurement_unknown");
+                printf(",\"subpacket_id\":%u,\"subpacket_version\":%u,\"subpacket_size\":%u,\"payload_hex\":\"",
+                       sub_id, sub_ver, sub_size);
+                hexprint(stdout, sub, sub_len < 192 ? sub_len : 192);
+                printf("\"}\n");
+            }
             parsed = 1;
         }
     }
@@ -355,11 +888,27 @@ static int parse_lte_rrc_scell(uint16_t log_id, uint64_t qts, const uint8_t *b, 
         dlbw = b[11]; ulbw = b[12]; cid = get32(b + 13); tac = get16(b + 17);
         band = get32(b + 19); mcc = get16(b + 23); mncd = b[25]; mnc = get16(b + 26);
     } else return 0;
-    json_prefix(log_id, qts, "LTE", "serving_cell_info");
-    printf(",\"version\":%u,\"pci\":%u,\"dl_earfcn\":%u,\"ul_earfcn\":%u,"
-           "\"band\":%u,\"dl_bandwidth_prb\":%u,\"ul_bandwidth_prb\":%u,"
-           "\"cell_id\":%u,\"tac\":%u,\"mcc\":%u,\"mnc\":\"%0*u\"}\n",
-           ver, pci, dl, ul, band, dlbw, ulbw, cid, tac, mcc, mncd == 3 ? 3 : 2, mnc);
+    state.lte_info.valid = 1;
+    state.lte_info.version = ver;
+    state.lte_info.pci = pci;
+    state.lte_info.dl_earfcn = dl;
+    state.lte_info.ul_earfcn = ul;
+    state.lte_info.band = band;
+    state.lte_info.dl_bandwidth_prb = dlbw;
+    state.lte_info.ul_bandwidth_prb = ulbw;
+    state.lte_info.cell_id = cid;
+    state.lte_info.tac = tac;
+    state.lte_info.mcc = mcc;
+    snprintf(state.lte_info.mnc, sizeof(state.lte_info.mnc), "%0*u", mncd == 3 ? 3 : 2, mnc);
+    state.lte_info.qts = qts;
+    state.lte_info.updated_at = time(NULL);
+    if (opt_stream_json) {
+        json_prefix(log_id, qts, "LTE", "serving_cell_info");
+        printf(",\"version\":%u,\"pci\":%u,\"dl_earfcn\":%u,\"ul_earfcn\":%u,"
+               "\"band\":%u,\"dl_bandwidth_prb\":%u,\"ul_bandwidth_prb\":%u,"
+               "\"cell_id\":%u,\"tac\":%u,\"mcc\":%u,\"mnc\":\"%0*u\"}\n",
+               ver, pci, dl, ul, band, dlbw, ulbw, cid, tac, mcc, mncd == 3 ? 3 : 2, mnc);
+    }
     return 1;
 }
 
@@ -375,9 +924,19 @@ static int parse_nr_rrc_scell(uint16_t log_id, uint64_t qts, const uint8_t *b, s
     uint32_t dl = rel_maj == 0 ? get32(b + off + 2) : get32(b + off + 10);
     uint32_t ul = rel_maj == 0 ? get32(b + off + 6) : get32(b + off + 14);
     uint16_t band = rel_maj == 0 ? get16(b + off + 32) : get16(b + off + 40);
-    json_prefix(log_id, qts, "NR", "serving_cell_info");
-    printf(",\"version\":\"%u.%u\",\"pci\":%u,\"dl_nr_arfcn\":%u,\"ul_nr_arfcn\":%u,\"band\":%u}\n",
-           rel_maj, rel_min, pci, dl, ul, band);
+    state.nr_serving.valid = 1;
+    snprintf(state.nr_serving.version, sizeof(state.nr_serving.version), "%u.%u", rel_maj, rel_min);
+    state.nr_serving.pci = pci;
+    state.nr_serving.dl_nr_arfcn = dl;
+    state.nr_serving.ul_nr_arfcn = ul;
+    state.nr_serving.band = band;
+    state.nr_serving.qts = qts;
+    state.nr_serving.updated_at = time(NULL);
+    if (opt_stream_json) {
+        json_prefix(log_id, qts, "NR", "serving_cell_info");
+        printf(",\"version\":\"%u.%u\",\"pci\":%u,\"dl_nr_arfcn\":%u,\"ul_nr_arfcn\":%u,\"band\":%u}\n",
+               rel_maj, rel_min, pci, dl, ul, band);
+    }
     return 1;
 }
 
@@ -415,17 +974,35 @@ static int parse_lte_mac_v1_dl_subpacket(uint16_t log_id, uint64_t qts, uint8_t 
             return parsed;
         }
         if (pos + header_len > sub_len) header_len = (uint8_t)(sub_len - pos);
-        json_prefix(log_id, qts, "LTE", "lte_mac_transport_block");
-        printf(",\"version\":%u,\"direction\":\"DL\",\"sample_index\":%u,"
-               "\"sfn\":%u,\"subframe\":%u,\"rnti_type\":%u,\"harq_id\":%u,"
-               "\"pmch_id\":%u,\"tbs_bytes\":%u,\"rlc_pdus\":%u,"
-               "\"padding_bytes\":%u,\"mac_header_len\":%u",
-               sub_ver, i, sfn_subfn >> 4, sfn_subfn & 0xf, rnti_type,
-               harq_id, pmch_id, dl_tbs, rlc_pdus, padding, header_len);
-        if (sub_ver == 4) printf(",\"cell_id\":%u,\"cc_id\":%u", cell_id, cell_id);
-        printf(",\"mac_header_hex\":\"");
-        hexprint(stdout, sub + pos, header_len);
-        printf("\"}\n");
+        uint8_t cc_id = sub_ver == 4 ? cell_id : 0;
+        lte_mac_dl_t *m = &state.mac_dl[cc_slot(cc_id)];
+        memset(m, 0, sizeof(*m));
+        m->valid = 1;
+        m->version = sub_ver;
+        m->cc_id = cc_id;
+        m->sfn = sfn_subfn >> 4;
+        m->subframe = sfn_subfn & 0xf;
+        m->rnti_type = rnti_type;
+        m->harq_id = harq_id;
+        m->tbs_bytes = dl_tbs;
+        m->padding_bytes = padding;
+        m->num_sdu = rlc_pdus;
+        m->num_lcid = 0;
+        m->qts = qts;
+        m->updated_at = time(NULL);
+        if (opt_stream_json) {
+            json_prefix(log_id, qts, "LTE", "lte_mac_transport_block");
+            printf(",\"version\":%u,\"direction\":\"DL\",\"sample_index\":%u,"
+                   "\"sfn\":%u,\"subframe\":%u,\"rnti_type\":%u,\"harq_id\":%u,"
+                   "\"pmch_id\":%u,\"tbs_bytes\":%u,\"rlc_pdus\":%u,"
+                   "\"padding_bytes\":%u,\"mac_header_len\":%u",
+                   sub_ver, i, sfn_subfn >> 4, sfn_subfn & 0xf, rnti_type,
+                   harq_id, pmch_id, dl_tbs, rlc_pdus, padding, header_len);
+            if (sub_ver == 4) printf(",\"cell_id\":%u,\"cc_id\":%u", cell_id, cell_id);
+            printf(",\"mac_header_hex\":\"");
+            hexprint(stdout, sub + pos, header_len);
+            printf("\"}\n");
+        }
         pos += header_len;
         parsed = 1;
     }
@@ -469,17 +1046,36 @@ static int parse_lte_mac_v1_ul_subpacket(uint16_t log_id, uint64_t qts, uint8_t 
             return parsed;
         }
         if (pos + header_len > sub_len) header_len = (uint8_t)(sub_len - pos);
-        json_prefix(log_id, qts, "LTE", "lte_mac_transport_block");
-        printf(",\"version\":%u,\"direction\":\"UL\",\"sample_index\":%u,"
-               "\"sfn\":%u,\"subframe\":%u,\"rnti_type\":%u,\"harq_id\":%u,"
-               "\"grant\":%u,\"rlc_pdus\":%u,\"padding_bytes\":%u,"
-               "\"bsr_event\":%u,\"bsr_trigger\":%u,\"mac_header_len\":%u",
-               sub_ver, i, sfn_subfn >> 4, sfn_subfn & 0xf, rnti_type,
-               harq_id, grant, rlc_pdus, padding, bsr_event, bsr_trig, header_len);
-        if (sub_ver != 1) printf(",\"subid\":%u,\"cell_id\":%u", subid, cell_id);
-        printf(",\"mac_header_hex\":\"");
-        hexprint(stdout, sub + pos, header_len);
-        printf("\"}\n");
+        uint8_t cc_id = sub_ver != 1 ? cell_id : 0;
+        lte_mac_ul_t *m = &state.mac_ul[cc_slot(cc_id)];
+        memset(m, 0, sizeof(*m));
+        m->valid = 1;
+        m->version = sub_ver;
+        m->cc_id = cc_id;
+        m->sfn = sfn_subfn >> 4;
+        m->subframe = sfn_subfn & 0xf;
+        m->rnti_type = rnti_type;
+        m->harq_id = harq_id;
+        m->grant = grant;
+        m->rlc_pdus = rlc_pdus;
+        m->padding_bytes = padding;
+        m->bsr_event = bsr_event;
+        m->bsr_trigger = bsr_trig;
+        m->qts = qts;
+        m->updated_at = time(NULL);
+        if (opt_stream_json) {
+            json_prefix(log_id, qts, "LTE", "lte_mac_transport_block");
+            printf(",\"version\":%u,\"direction\":\"UL\",\"sample_index\":%u,"
+                   "\"sfn\":%u,\"subframe\":%u,\"rnti_type\":%u,\"harq_id\":%u,"
+                   "\"grant\":%u,\"rlc_pdus\":%u,\"padding_bytes\":%u,"
+                   "\"bsr_event\":%u,\"bsr_trigger\":%u,\"mac_header_len\":%u",
+                   sub_ver, i, sfn_subfn >> 4, sfn_subfn & 0xf, rnti_type,
+                   harq_id, grant, rlc_pdus, padding, bsr_event, bsr_trig, header_len);
+            if (sub_ver != 1) printf(",\"subid\":%u,\"cell_id\":%u", subid, cell_id);
+            printf(",\"mac_header_hex\":\"");
+            hexprint(stdout, sub + pos, header_len);
+            printf("\"}\n");
+        }
         pos += header_len;
         parsed = 1;
     }
@@ -522,16 +1118,34 @@ static int parse_lte_mac_dl_v49(uint16_t log_id, uint64_t qts, const uint8_t *b,
         uint8_t num_sdu = b[pos + 13];
         uint16_t hdr_len_word = get16(b + pos + 14);
         pos += 16;
-        json_prefix(log_id, qts, "LTE", "lte_mac_transport_block");
-        printf(",\"version\":%u,\"direction\":\"DL\",\"tb_index\":%u,"
-               "\"reason\":%u,\"num_lcid\":%u,\"sfn\":%u,\"subframe\":%u,"
-               "\"rnti_type\":%u,\"cc_id\":%u,\"harq_id\":%u,"
-               "\"tbs_bytes\":%u,\"padding_bytes\":%u,\"num_sdu\":%u,"
-               "\"mac_header_len\":%u}\n",
-               ver, i, reason, num_lcid, bitu32(sfn_word, 0, 10),
-               bitu32(sfn_word, 10, 4), bitu32(sfn_word, 15, 4),
-               bitu32(cc_harq, 0, 4), bitu32(cc_harq, 4, 4), size, pad,
-               num_sdu, bitu32(hdr_len_word, 0, 12));
+        uint8_t cc_id = bitu32(cc_harq, 0, 4);
+        lte_mac_dl_t *m = &state.mac_dl[cc_slot(cc_id)];
+        memset(m, 0, sizeof(*m));
+        m->valid = 1;
+        m->version = ver;
+        m->cc_id = cc_id;
+        m->sfn = bitu32(sfn_word, 0, 10);
+        m->subframe = bitu32(sfn_word, 10, 4);
+        m->rnti_type = bitu32(sfn_word, 15, 4);
+        m->harq_id = bitu32(cc_harq, 4, 4);
+        m->tbs_bytes = size;
+        m->padding_bytes = pad;
+        m->num_sdu = num_sdu;
+        m->num_lcid = num_lcid;
+        m->qts = qts;
+        m->updated_at = time(NULL);
+        if (opt_stream_json) {
+            json_prefix(log_id, qts, "LTE", "lte_mac_transport_block");
+            printf(",\"version\":%u,\"direction\":\"DL\",\"tb_index\":%u,"
+                   "\"reason\":%u,\"num_lcid\":%u,\"sfn\":%u,\"subframe\":%u,"
+                   "\"rnti_type\":%u,\"cc_id\":%u,\"harq_id\":%u,"
+                   "\"tbs_bytes\":%u,\"padding_bytes\":%u,\"num_sdu\":%u,"
+                   "\"mac_header_len\":%u}\n",
+                   ver, i, reason, num_lcid, bitu32(sfn_word, 0, 10),
+                   bitu32(sfn_word, 10, 4), bitu32(sfn_word, 15, 4),
+                   cc_id, bitu32(cc_harq, 4, 4), size, pad,
+                   num_sdu, bitu32(hdr_len_word, 0, 12));
+        }
         for (uint8_t j = 0; j < num_sdu && pos + 12 <= len; j++) {
             uint32_t common = (uint32_t)b[pos] | ((uint32_t)b[pos + 1] << 8) | ((uint32_t)b[pos + 2] << 16);
             uint8_t is_mce = bitu32(common, 0, 1);
@@ -573,19 +1187,35 @@ static int parse_lte_phy_pusch_tx_candidate(uint16_t log_id, uint64_t qts, const
         uint16_t tti = get16(rec);
         uint16_t grant = get16(rec + 8);
         int16_t tx_power_raw = (int16_t)get16(rec + 4);
-        json_prefix(log_id, qts, "LTE", "lte_phy_pusch_tx_candidate");
-        printf(",\"version\":%u,\"subversion\":%u,\"header_tti\":%u,"
-               "\"record_index\":%zu,\"record_count\":%zu,\"tti\":%u,"
-               "\"sfn_guess\":%u,\"subframe_guess\":%u,\"record_flags_raw\":%u,"
-               "\"grant\":%u,\"tx_power_raw\":%d,\"field_10_raw\":%u,"
-               "\"field_34_raw\":%u,\"field_36_raw\":%u,\"field_40_raw\":%u,"
-               "\"field_42_raw\":%u,\"field_46_raw\":%u,\"record_hex\":\"",
-               b[0], b[1], header_tti, i, count, tti, (tti / 10) % 1024,
-               tti % 10, get16(rec + 2), grant, tx_power_raw, get16(rec + 10),
-               get16(rec + 34), get16(rec + 36), get16(rec + 40), get16(rec + 42),
-               get16(rec + 46));
-        hexprint(stdout, rec, 100);
-        printf("\"}\n");
+        state.pusch.valid = 1;
+        state.pusch.tti = tti;
+        state.pusch.sfn_guess = (tti / 10) % 1024;
+        state.pusch.subframe_guess = tti % 10;
+        state.pusch.grant = grant;
+        state.pusch.tx_power_raw = tx_power_raw;
+        state.pusch.field_10_raw = get16(rec + 10);
+        state.pusch.field_34_raw = get16(rec + 34);
+        state.pusch.field_36_raw = get16(rec + 36);
+        state.pusch.field_40_raw = get16(rec + 40);
+        state.pusch.field_42_raw = get16(rec + 42);
+        state.pusch.field_46_raw = get16(rec + 46);
+        state.pusch.qts = qts;
+        state.pusch.updated_at = time(NULL);
+        if (opt_stream_json) {
+            json_prefix(log_id, qts, "LTE", "lte_phy_pusch_tx_candidate");
+            printf(",\"version\":%u,\"subversion\":%u,\"header_tti\":%u,"
+                   "\"record_index\":%zu,\"record_count\":%zu,\"tti\":%u,"
+                   "\"sfn_guess\":%u,\"subframe_guess\":%u,\"record_flags_raw\":%u,"
+                   "\"grant\":%u,\"tx_power_raw\":%d,\"field_10_raw\":%u,"
+                   "\"field_34_raw\":%u,\"field_36_raw\":%u,\"field_40_raw\":%u,"
+                   "\"field_42_raw\":%u,\"field_46_raw\":%u,\"record_hex\":\"",
+                   b[0], b[1], header_tti, i, count, tti, (tti / 10) % 1024,
+                   tti % 10, get16(rec + 2), grant, tx_power_raw, get16(rec + 10),
+                   get16(rec + 34), get16(rec + 36), get16(rec + 40), get16(rec + 42),
+                   get16(rec + 46));
+            hexprint(stdout, rec, 100);
+            printf("\"}\n");
+        }
     }
     return 1;
 }
@@ -602,29 +1232,47 @@ static void parse_log_body(uint16_t log_id, uint64_t qts, const uint8_t *body, s
     else if (log_id == LOG_LTE_CA) {
         got_lte = 1;
         write_combo(combo_dir, "b0cd_qlte.hex", body, body_len);
-        json_prefix(log_id, qts, "LTE", "supported_ca_combos_raw");
-        printf(",\"format\":\"QLTE\",\"payload_hex\":\""); hexprint(stdout, body, body_len); printf("\"}\n");
+        state.lte_combo.valid = 1;
+        snprintf(state.lte_combo.format, sizeof(state.lte_combo.format), "%s", "QLTE");
+        combo_path(state.lte_combo.path, sizeof(state.lte_combo.path), "b0cd_qlte.hex");
+        state.lte_combo.bytes = body_len;
+        state.lte_combo.qts = qts;
+        state.lte_combo.updated_at = time(NULL);
+        if (opt_stream_json) {
+            json_prefix(log_id, qts, "LTE", "supported_ca_combos_raw");
+            printf(",\"format\":\"QLTE\",\"payload_hex\":\""); hexprint(stdout, body, body_len); printf("\"}\n");
+        }
         parsed = 1;
     } else if (log_id == LOG_NR_CA) {
         got_nr = 1;
         write_combo(combo_dir, "b826_qnr.hex", body, body_len);
-        json_prefix(log_id, qts, "NR", "supported_ca_combos_raw");
-        printf(",\"format\":\"QNR\",\"payload_hex\":\""); hexprint(stdout, body, body_len); printf("\"}\n");
+        state.nr_combo.valid = 1;
+        snprintf(state.nr_combo.format, sizeof(state.nr_combo.format), "%s", "QNR");
+        combo_path(state.nr_combo.path, sizeof(state.nr_combo.path), "b826_qnr.hex");
+        state.nr_combo.bytes = body_len;
+        state.nr_combo.qts = qts;
+        state.nr_combo.updated_at = time(NULL);
+        if (opt_stream_json) {
+            json_prefix(log_id, qts, "NR", "supported_ca_combos_raw");
+            printf(",\"format\":\"QNR\",\"payload_hex\":\""); hexprint(stdout, body, body_len); printf("\"}\n");
+        }
         parsed = 1;
     }
-    if ((!parsed && opt_debug) || opt_raw ||
+    if (!opt_no_raw_log && opt_stream_json &&
+        ((!parsed && opt_debug) || opt_raw ||
         (opt_probe_scheduling && is_probe_scheduling_log(log_id)) ||
-        (opt_probe_phy && is_probe_phy_log(log_id))) {
+        (opt_probe_phy && is_probe_phy_log(log_id)))) {
         json_prefix(log_id, qts, "RAW", "diag_log_raw");
         printf(",\"body_len\":%zu,\"body_hex\":\"", body_len);
         hexprint(stdout, body, body_len);
         printf("\"}\n");
     }
-    fflush(stdout);
+    if (opt_stream_json) fflush(stdout);
 }
 
 static void on_log(unsigned char *ptr, int len) {
     if (!ptr || len < 12) return;
+    events_seen++;
     uint16_t rec_len = get16(ptr);
     uint16_t log_id = get16(ptr + 2);
     uint64_t qts = get64(ptr + 4);
@@ -634,7 +1282,7 @@ static void on_log(unsigned char *ptr, int len) {
 }
 
 static void on_event(unsigned char *ptr, int len) {
-    if (!opt_debug) return;
+    if (!opt_debug || !opt_stream_json || opt_no_raw_log) return;
     printf("{\"event\":\"diag_event_raw\",\"len\":%d,\"payload_hex\":\"", len);
     hexprint(stdout, ptr, len > 256 ? 256 : (size_t)len);
     printf("\"}\n");
@@ -645,6 +1293,8 @@ static void usage(const char *argv0) {
     fprintf(stderr,
         "Usage: %s [--seconds N] [--proc msm|mdm|auto] [--debug] [--raw]\n"
         "          [--mac] [--probe-scheduling] [--probe-phy] [--combo-dir DIR]\n"
+        "          [--snapshot-file PATH] [--snapshot-interval-ms N]\n"
+        "          [--stale-after-ms N] [--no-raw-log] [--max-runtime-sec N]\n"
         "          [--wait-uecap lte|nr|both]\n", argv0);
 }
 
@@ -661,6 +1311,11 @@ int main(int argc, char **argv) {
         {"wait-uecap", required_argument, 0, 5},
         {"probe-scheduling", no_argument, 0, 6},
         {"probe-phy", no_argument, 0, 7},
+        {"snapshot-file", required_argument, 0, 8},
+        {"snapshot-interval-ms", required_argument, 0, 9},
+        {"no-raw-log", no_argument, 0, 10},
+        {"max-runtime-sec", required_argument, 0, 11},
+        {"stale-after-ms", required_argument, 0, 12},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
@@ -677,8 +1332,20 @@ int main(int argc, char **argv) {
         else if (c == 5) wait = optarg;
         else if (c == 6) opt_probe_scheduling = 1;
         else if (c == 7) opt_probe_phy = 1;
+        else if (c == 8) snapshot_file = optarg;
+        else if (c == 9) snapshot_interval_ms = atoi(optarg);
+        else if (c == 10) opt_no_raw_log = 1;
+        else if (c == 11) seconds = atoi(optarg);
+        else if (c == 12) stale_after_ms = atoi(optarg);
         else { usage(argv[0]); return c == 'h' ? 0 : 2; }
     }
+    if (snapshot_interval_ms <= 0) snapshot_interval_ms = 10000;
+    if (stale_after_ms <= 0) stale_after_ms = 30000;
+    if (snapshot_file) {
+        opt_stream_json = 0;
+        opt_no_raw_log = 1;
+    }
+    runtime_start = time(NULL);
 
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
@@ -692,6 +1359,8 @@ int main(int argc, char **argv) {
 
     if (!Diag_LSM_Init(NULL)) {
         fprintf(stderr, "Diag_LSM_Init failed: errno=%d\n", errno);
+        snprintf(last_error, sizeof(last_error), "Diag_LSM_Init failed errno=%d", errno);
+        write_snapshot(0);
         return 1;
     }
 
@@ -700,11 +1369,13 @@ int main(int argc, char **argv) {
     int err = diag_register_dci_client(&client_id, &list, proc, &dci_sig);
     if (err != DIAG_DCI_NO_ERROR) {
         fprintf(stderr, "diag_register_dci_client proc=%d failed err=%d errno=%d\n", proc, err, errno);
+        snprintf(last_error, sizeof(last_error), "diag_register_dci_client failed err=%d errno=%d", err, errno);
+        write_snapshot(0);
         Diag_LSM_DeInit();
         return 1;
     }
     err = diag_get_dci_support_list_proc(proc, &list);
-    if (opt_debug && err == DIAG_DCI_NO_ERROR) {
+    if (opt_debug && opt_stream_json && err == DIAG_DCI_NO_ERROR) {
         printf("{\"event\":\"dci_support\",\"proc\":%d,\"mpss\":%s,\"apss\":%s,\"lpass\":%s,\"wcnss\":%s}\n",
                proc, (list & DIAG_CON_MPSS) ? "true" : "false",
                (list & DIAG_CON_APSS) ? "true" : "false",
@@ -714,10 +1385,12 @@ int main(int argc, char **argv) {
     err = diag_register_dci_signal_data(client_id, dci_sig);
     if (err != DIAG_DCI_NO_ERROR && err != DIAG_DCI_NOT_SUPPORTED) {
         fprintf(stderr, "diag_register_dci_signal_data failed err=%d errno=%d\n", err, errno);
+        snprintf(last_error, sizeof(last_error), "diag_register_dci_signal_data failed err=%d errno=%d", err, errno);
     }
     err = diag_register_dci_stream_proc(client_id, on_log, on_event);
     if (err != DIAG_DCI_NO_ERROR) {
         fprintf(stderr, "diag_register_dci_stream_proc failed err=%d errno=%d\n", err, errno);
+        snprintf(last_error, sizeof(last_error), "diag_register_dci_stream_proc failed err=%d errno=%d", err, errno);
     }
     diag_dci_vote_real_time(client_id, MODE_REALTIME);
 
@@ -773,10 +1446,20 @@ int main(int argc, char **argv) {
     err = diag_log_stream_config(client_id, ENABLE, logs, count);
     if (err != DIAG_DCI_NO_ERROR) {
         fprintf(stderr, "diag_log_stream_config enable failed err=%d errno=%d\n", err, errno);
+        snprintf(last_error, sizeof(last_error), "diag_log_stream_config enable failed err=%d errno=%d", err, errno);
     }
 
     time_t start = time(NULL);
+    uint64_t next_snapshot_ms = monotonic_ms() + (uint64_t)snapshot_interval_ms;
+    if (snapshot_file) write_snapshot(1);
     while (running) {
+        if (snapshot_file) {
+            uint64_t now_ms = monotonic_ms();
+            if (now_ms >= next_snapshot_ms) {
+                write_snapshot(1);
+                next_snapshot_ms = now_ms + (uint64_t)snapshot_interval_ms;
+            }
+        }
         if (seconds > 0 && time(NULL) - start >= seconds) break;
         if (wait) {
             if ((!strcmp(wait, "lte") && got_lte) || (!strcmp(wait, "nr") && got_nr) ||
@@ -790,5 +1473,6 @@ int main(int argc, char **argv) {
     diag_deregister_dci_signal_data(client_id, dci_sig);
     diag_release_dci_client(&client_id);
     Diag_LSM_DeInit();
+    if (snapshot_file) write_snapshot(0);
     return 0;
 }

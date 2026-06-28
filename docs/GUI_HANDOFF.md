@@ -7,21 +7,86 @@ This file is the contract for a modem-side advanced signal GUI fed by `qdiagmon-
 Preferred runtime on T99W175-style firmware:
 
 ```sh
-/tmp/qdiagmon-dci --mac --combo-dir /tmp/qdiag-combos > /tmp/qdiag-live.jsonl 2>/tmp/qdiag-live.err
+/tmp/qdiagmon-dci \
+  --snapshot-file /tmp/qdiag-state.json \
+  --snapshot-interval-ms 10000 \
+  --no-raw-log \
+  --max-runtime-sec 600 \
+  --mac \
+  --combo-dir /tmp/qdiag-combos \
+  >/dev/null 2>/tmp/qdiag-state.err &
 ```
 
-Do not use that continuous command directly from a production GUI page. It is for development captures. On the module, DIAG streaming can be CPU-heavy if it is left running.
+This is the production WebUI path. The binary collects DIAG, updates an in-memory aggregate state, and atomically writes a small snapshot:
 
-Preferred GUI sampling policy:
+```text
+/tmp/qdiag-state.json.tmp -> rename -> /tmp/qdiag-state.json
+```
+
+The CGI must not parse large JSONL logs. It should only return the snapshot:
+
+```sh
+#!/bin/sh
+printf 'Content-Type: application/json\r\n\r\n'
+cat /tmp/qdiag-state.json 2>/dev/null || \
+  printf '{"updated_at":0,"stale_after_ms":30000,"lte":{"serving_cell":{},"per_antenna":[],"mac":{},"ca":{}},"nr":{"layers":[],"ca":{}},"runtime":{"running":false,"uptime_s":0,"events_seen":0,"last_error":"no snapshot yet"}}\n'
+```
+
+GUI polling defaults:
+
+```json
+{"poll_interval_ms":10000,"stale_after_ms":30000}
+```
+
+Do not delete `/tmp/qdiag-state.json` after a CGI call. The binary overwrites the same file; deleting it creates empty responses, races with the writer, and unnecessary flash/tmpfs churn.
+
+The snapshot is intentionally compact and GUI-ready:
+
+```json
+{
+  "updated_at": 1782651117,
+  "stale_after_ms": 30000,
+  "lte": {
+    "serving_cell": {},
+    "serving_info": {},
+    "per_antenna": [],
+    "mac": {
+      "dl_by_cc": [],
+      "ul_by_cc": [],
+      "phy_pusch_tx": {}
+    },
+    "ca": {
+      "observed_cc_ids": [],
+      "observed_component_count": 0,
+      "supported_combos": {}
+    }
+  },
+  "nr": {
+    "serving_cell": {},
+    "layers": [],
+    "ca": {
+      "supported_combos": {}
+    }
+  },
+  "runtime": {
+    "running": true,
+    "uptime_s": 120,
+    "events_seen": 4520,
+    "last_error": ""
+  }
+}
+```
+
+Fallback policy for old binaries without snapshot mode:
 
 ```sh
 QDIAG_SECONDS=2 QDIAG_MAX_AGE=10 QDIAG_MAC=1 QDIAG_PROBE_PHY=0 \
   /tmp/qdiag-gui-sample.sh > /tmp/qdiag-gui-response.jsonl
 ```
 
-This runs a short one-shot capture only when the cache is older than 10 seconds. If multiple page requests arrive together, the sampler returns the cached JSONL instead of starting a second DIAG reader.
+This shell sampler runs a short one-shot capture only when the cache is older than 10 seconds. Prefer native snapshot mode whenever possible.
 
-For a quick finite capture:
+For parser development or offline evidence only, JSONL stream mode is still available:
 
 ```sh
 /tmp/qdiagmon-dci --seconds 30 --mac --combo-dir /tmp/qdiag-combos > /tmp/qdiag-live.jsonl
@@ -49,7 +114,7 @@ These are not guaranteed to contain MCS/RB/modulation. They are a safe next prob
 
 Keep `--probe-phy` out of the normal page refresh path. It should be exposed only as an explicit debug capture button because it produces many more events and can raise CPU load.
 
-On a Python-capable host, use the state writer:
+On a Python-capable host, use the Python state writer:
 
 ```sh
 PYTHONPATH=src python3 -m qdiagparser parse capture.qmdl \
@@ -57,7 +122,7 @@ PYTHONPATH=src python3 -m qdiagparser parse capture.qmdl \
   --combo-dir ./qdiag-combos
 ```
 
-The modem-side C runtime writes JSONL events only. A GUI can either consume the stream directly or run a tiny collector that keeps the latest event per metric and writes the same state shape described below.
+The modem-side C runtime now writes the same kind of latest-state snapshot directly. Keep JSONL mode for development captures, not for the production CGI.
 
 ## Minimum Functional Dashboard
 
@@ -79,17 +144,19 @@ Top-level keys:
 
 - `lte`: latest LTE metrics and helper groups.
 - `nr`: latest NR metrics and helper groups.
-- `combos`: latest raw `QLTE`/`QNR` capability payloads.
-- `missing_metrics`: stable placeholders for fields not decoded yet.
-- `warnings`: last parser warnings.
-- `meta`: collector timestamps and event count. A modem-side collector should also add `source`, `parser_version`, and `stale_after_ms` when available.
+- `runtime`: process status, uptime, event count, and last error.
+- `updated_at` and `stale_after_ms`: top-level freshness contract for the GUI.
+
+The compact modem snapshot does not repeat `missing_metrics` on every write. Keep those placeholders static in the GUI from the list below and render them as unavailable until a decoder fills them.
 
 Important nested keys:
 
-- `lte.per_antenna["0"]`: latest LTE per-RX metrics for cell index `0`.
-- `lte.mac.dl`: latest decoded LTE DL transport block.
-- `lte.mac.ul`: latest decoded LTE UL transport block.
-- `nr.ml1_latest`: latest NR ML1 measurement database update.
+- `lte.per_antenna[]`: latest LTE per-RX metrics keyed internally by `earfcn + pci + cell_index`.
+- `lte.mac.dl_by_cc[]`: latest decoded LTE DL transport block per component carrier.
+- `lte.mac.ul_by_cc[]`: latest decoded LTE UL transport block per component carrier.
+- `lte.ca.observed_cc_ids[]`: component carriers observed from MAC activity, already normalized for 2CA/3CA/4CA views.
+- `nr.serving_cell`: latest NR serving cell info when emitted by the modem.
+- `nr.layers[]`: reserved for NR layer metrics; currently empty in the C snapshot until the NR ML1 decoder is promoted into the runtime.
 
 ## Stable Events
 
@@ -179,13 +246,13 @@ The GUI should show `status` text or a muted placeholder. Do not coerce `null` t
 
 ## Polling Pitfalls
 
-Production dashboard mode should consume normal JSONL, not debug/raw JSONL. `--raw` and `--debug` are useful while developing decoders, but they duplicate parsed events and can grow quickly.
+Production dashboard mode should consume `/tmp/qdiag-state.json`, not JSONL. `--raw` and `--debug` are useful while developing decoders, but they duplicate parsed events and can grow quickly.
 
-The advanced signals page should not keep `qdiagmon-dci` running permanently. Recommended defaults are a 2 second capture every 10 seconds, with cached results served between captures. Avoid polling faster than 10 seconds unless the user explicitly opens a debug/profiling mode.
+The advanced signals page should poll the snapshot at most every 10 seconds and treat it as stale after 30 seconds. Avoid polling faster than 10 seconds unless the user explicitly opens a debug/profiling mode.
 
-The DCI binary emits `qxdm_ts`; the Python parser emits ISO `time`. A GUI or collector should accept either. Prefer `qxdm_ts` for event ordering when present, and mark tiles stale when no fresh event arrives for roughly `2-3` seconds.
+The DCI binary emits `qxdm_ts` inside nested records and `updated_at` at the snapshot level. Prefer top-level `updated_at` for GUI freshness and `qxdm_ts` for event ordering/details.
 
-Combo payloads can be large. Save them as files (`b0cd_qlte.hex`, `b826_qnr.hex`) and expose path, size, timestamp, and format in the UI. Do not copy the full `payload_hex` into a frequently polled state endpoint unless the page explicitly opens a debug/detail view.
+Combo payloads can be large. Snapshot mode saves them as files (`b0cd_qlte.hex`, `b826_qnr.hex`) and exposes only path, size, timestamp, and format. Do not copy full `payload_hex` into a frequently polled endpoint unless the page explicitly opens a debug/detail view.
 
 For multi-cell displays, key LTE per-antenna entries by at least `earfcn + pci + cell_index`, not just event name. For NR, key layers/beams by `nr_arfcn + serving_pci + layer + ssb_index` when those fields are present.
 
@@ -195,6 +262,7 @@ Validated on T99W175:
 
 - `/dev/diag` + Qualcomm DCI works.
 - `qdiagmon-dci --mac` emits signal and MAC JSON directly.
+- Snapshot mode was live-tested with `--snapshot-file /tmp/qdiag-state.json --snapshot-interval-ms 10000 --no-raw-log --max-runtime-sec 25 --mac --combo-dir /tmp/qdiag-combos`: stdout/stderr stayed at 0 bytes, the snapshot grew from 381 bytes initial state to about 1.3 KB with LTE per-antenna and MAC data, no `.tmp` file was left behind, and the final snapshot had `runtime.running:false`.
 - Forced Hetzner download through `enx00e04c6802a5` produced LTE MAC DL/UL events.
 - QLTE and QNR combo payloads were captured as `b0cd_qlte.hex` and `b826_qnr.hex`.
 - `--probe-scheduling` was tested; it produced measurement/search/RACH candidates, not confirmed MCS/RB/modulation.
