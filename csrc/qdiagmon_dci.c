@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -88,20 +89,42 @@ static int opt_debug = 0;
 static int opt_raw = 0;
 static int opt_no_raw_log = 0;
 static int opt_stream_json = 1;
+static int opt_gui_lite = 0;
+static int opt_full_logset = 0;
 static int opt_probe_scheduling = 0;
 static int opt_probe_phy = 0;
 static const char *combo_dir = NULL;
 static const char *snapshot_file = NULL;
 static int snapshot_interval_ms = 10000;
+static int sample_window_ms = -1;
 static int stale_after_ms = 30000;
+static int nice_increment = 0;
+static int log_stream_enabled = 0;
+static int opt_oneshot = 0;
+static int sample_min_ms = 800;
+static int require_mode = 1;
 static int got_lte = 0;
 static int got_nr = 0;
 static time_t runtime_start = 0;
 static unsigned long long events_seen = 0;
+static unsigned long long sample_events_seen = 0;
+static uint64_t sample_started_ms = 0;
+static int sample_signal_seen = 0;
+static int sample_mac_seen = 0;
 static char last_error[160] = "";
 
+#define REQUIRE_ANY 0
+#define REQUIRE_SIGNAL 1
+#define REQUIRE_SIGNAL_MAC 2
+#define REQUIRE_MAC 3
 #define MAX_LTE_ANTENNA_CELLS 8
 #define MAX_LTE_CC 8
+#define MAX_LOG_COUNTS 64
+
+typedef struct {
+    const char *name;
+    const char *source_candidates;
+} missing_metric_t;
 
 typedef struct {
     int valid;
@@ -215,6 +238,29 @@ typedef struct {
 
 typedef struct {
     int valid;
+    uint8_t version;
+    uint8_t subversion;
+    uint16_t header_word;
+    uint16_t record_index;
+    uint16_t record_count;
+    uint16_t tti_guess;
+    uint8_t mcs_candidate_raw;
+    uint16_t field_0_raw;
+    uint16_t field_2_raw;
+    uint16_t field_4_raw;
+    uint16_t field_8_raw;
+    uint16_t field_12_raw;
+    uint16_t field_16_raw;
+    uint16_t field_18_raw;
+    uint16_t field_20_raw;
+    uint16_t field_24_raw;
+    uint16_t field_28_raw;
+    uint64_t qts;
+    time_t updated_at;
+} lte_phy_pdsch_t;
+
+typedef struct {
+    int valid;
     char version[16];
     uint16_t pci;
     uint32_t dl_nr_arfcn;
@@ -234,18 +280,61 @@ typedef struct {
 } combo_state_t;
 
 typedef struct {
+    int valid;
+    uint16_t log_id;
+    unsigned long long count;
+    uint64_t last_qts;
+    time_t last_seen_at;
+} log_count_t;
+
+typedef struct {
     lte_serving_measurement_t lte_serving;
     lte_serving_info_t lte_info;
     lte_per_antenna_t lte_ant[MAX_LTE_ANTENNA_CELLS];
     lte_mac_dl_t mac_dl[MAX_LTE_CC];
     lte_mac_ul_t mac_ul[MAX_LTE_CC];
     lte_phy_pusch_t pusch;
+    lte_phy_pdsch_t pdsch;
     nr_serving_info_t nr_serving;
     combo_state_t lte_combo;
     combo_state_t nr_combo;
 } snapshot_state_t;
 
 static snapshot_state_t state;
+static log_count_t log_counts[MAX_LOG_COUNTS];
+
+static const missing_metric_t lte_missing_metrics[] = {
+    {"dl_mcs", "LTE 0xB130/0xB132/0xB144/0xB173"},
+    {"ul_mcs", "LTE 0xB139/0xB174"},
+    {"dl_modulation", "LTE 0xB130/0xB132/0xB144/0xB173"},
+    {"ul_modulation", "LTE 0xB139/0xB174"},
+    {"dl_rb_alloc", "LTE 0xB126/0xB130/0xB132"},
+    {"ul_rb_alloc", "LTE 0xB139/0xB174"},
+    {"cqi", "LTE 0xB140/0xB175/0xB176"},
+    {"ri", "LTE 0xB177"},
+    {"pmi", "LTE 0xB178"},
+    {"bler", "LTE 0xB144/0xB173"},
+    {"tx_power_dbm", "LTE 0xB139/0xB16D/0xB174"}
+};
+
+static const missing_metric_t nr_missing_metrics[] = {
+    {"nr_mode", "NR NAS/RRC state logs"},
+    {"endc_anchor", "LTE/NR RRC configuration logs"},
+    {"ss_rsrp_dbm", "NR ML1 measurement database"},
+    {"ss_rsrq_db", "NR ML1 measurement database"},
+    {"ss_sinr_db", "NR ML1 measurement/log version mapping"},
+    {"per_rx_rsrp_dbm", "NR ML1 measurement database"},
+    {"per_rx_sinr_db", "NR ML1 measurement/log version mapping"},
+    {"dl_mcs", "NR MAC/PHY scheduling logs"},
+    {"ul_mcs", "NR MAC/PHY scheduling logs"},
+    {"dl_modulation", "NR MAC/PHY scheduling logs"},
+    {"ul_modulation", "NR MAC/PHY scheduling logs"},
+    {"dl_rb_alloc", "NR MAC/PHY scheduling logs"},
+    {"ul_rb_alloc", "NR MAC/PHY scheduling logs"},
+    {"rank_ri", "NR MAC/PHY scheduling logs"},
+    {"cqi", "NR MAC/PHY scheduling logs"},
+    {"tx_power_dbm", "NR MAC/PHY scheduling logs"}
+};
 
 static uint16_t get16(const uint8_t *p) {
     return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
@@ -270,9 +359,38 @@ static uint64_t monotonic_ms(void) {
     return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
 }
 
+static void sleep_ms(unsigned int ms) {
+    struct timespec ts;
+    ts.tv_sec = ms / 1000;
+    ts.tv_nsec = (long)(ms % 1000) * 1000000L;
+    while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {
+    }
+}
+
 static void set_last_error(const char *msg) {
     if (!msg) msg = "";
     snprintf(last_error, sizeof(last_error), "%s", msg);
+}
+
+static void reset_sample_cycle(void) {
+    sample_events_seen = 0;
+    sample_signal_seen = 0;
+    sample_mac_seen = 0;
+    sample_started_ms = monotonic_ms();
+}
+
+static int sample_has_enough_data(void) {
+    if (require_mode == REQUIRE_ANY) return sample_events_seen > 0;
+    if (require_mode == REQUIRE_MAC) return sample_mac_seen;
+    if (require_mode == REQUIRE_SIGNAL_MAC) return sample_signal_seen && sample_mac_seen;
+    return sample_signal_seen;
+}
+
+static const char *require_mode_name(void) {
+    if (require_mode == REQUIRE_ANY) return "any";
+    if (require_mode == REQUIRE_MAC) return "mac";
+    if (require_mode == REQUIRE_SIGNAL_MAC) return "signal-mac";
+    return "signal";
 }
 
 static int lte_ant_slot(uint32_t earfcn, uint16_t pci, uint32_t cell_index) {
@@ -322,6 +440,76 @@ static void combo_path(char *out, size_t out_len, const char *name) {
     out[0] = '\0';
     if (!combo_dir) return;
     snprintf(out, out_len, "%s/%s", combo_dir, name);
+}
+
+static const char *log_name(uint16_t log_id) {
+    switch (log_id) {
+        case LOG_LTE_SMEAS: return "lte_ml1_serving_cell_meas";
+        case LOG_LTE_NMEAS: return "lte_ml1_neighbor_measurements";
+        case LOG_LTE_SMEAS_RESP: return "lte_ml1_serving_cell_meas_response";
+        case LOG_LTE_CELL_INFO: return "lte_ml1_serving_cell_info";
+        case LOG_LTE_RRC_OTA: return "lte_rrc_ota_message";
+        case LOG_LTE_RRC_MIB: return "lte_rrc_mib";
+        case LOG_LTE_RRC_SCELL: return "lte_rrc_serving_cell_info";
+        case LOG_LTE_CA: return "lte_rrc_supported_ca_combos";
+        case LOG_LTE_MAC_DL: return "lte_mac_dl_transport_block";
+        case LOG_LTE_MAC_UL: return "lte_mac_ul_transport_block";
+        case LOG_LTE_PHY_PDSCH_DEMAPPER_CONFIG: return "lte_phy_pdsch_demapper_config_candidate";
+        case LOG_LTE_PHY_PDCCH_DECODING_RESULT: return "lte_phy_pdcch_decoding_result_candidate";
+        case LOG_LTE_PHY_PDCCH_DECODING_RESULT2: return "lte_phy_pdcch_decoding_result2_candidate";
+        case LOG_LTE_PHY_PUSCH_TX_REPORT: return "lte_phy_pusch_tx_report_candidate";
+        case LOG_LTE_PHY_PUCCH_TX_REPORT: return "lte_phy_pucch_tx_report_candidate";
+        case LOG_LTE_PHY_PUSCH_CSF_REPORT: return "lte_phy_pusch_csf_report_candidate";
+        case LOG_LTE_PHY_PDSCH_STAT_INDICATION: return "lte_phy_pdsch_stat_indication_candidate";
+        case LOG_LTE_PHY_PDCCH_PHICH_INDICATION: return "lte_phy_pdcch_phich_indication_candidate";
+        case LOG_LTE_PHY_GM_TX_REPORT: return "lte_phy_gm_tx_report_candidate";
+        case LOG_LTE_PHY_PDSCH_STAT_INDICATION2: return "lte_phy_pdsch_stat_indication2_candidate";
+        case LOG_LTE_PHY_PUSCH_STAT_INDICATION: return "lte_phy_pusch_stat_indication_candidate";
+        case LOG_LTE_PHY_PUCCH_CSF_REPORT: return "lte_phy_pucch_csf_report_candidate";
+        case LOG_LTE_PHY_CQI_REPORT: return "lte_phy_cqi_report_candidate";
+        case LOG_LTE_PHY_RI_REPORT: return "lte_phy_ri_report_candidate";
+        case LOG_LTE_PHY_PMI_REPORT: return "lte_phy_pmi_report_candidate";
+        case LOG_LTE_ML1_MAC_RAR_MSG1: return "lte_ml1_mac_rar_msg1_report";
+        case LOG_LTE_ML1_MAC_RAR_MSG2: return "lte_ml1_mac_rar_msg2_report";
+        case LOG_LTE_ML1_MAC_RAR_MSG3: return "lte_ml1_mac_msg3_report";
+        case LOG_LTE_ML1_MAC_RAR_MSG4: return "lte_ml1_mac_msg4_report";
+        case LOG_LTE_ML1_CONNECTED_INTRA_FREQ: return "lte_ml1_connected_intra_freq_meas";
+        case LOG_LTE_ML1_NEIGHBOR_REQ_RESP: return "lte_ml1_neighbor_cell_meas_req_response";
+        case LOG_LTE_ML1_SEARCH_REQ_RESP: return "lte_ml1_search_req_response";
+        case LOG_LTE_ML1_CONNECTED_NEIGHBOR_REQ_RESP: return "lte_ml1_connected_neighbor_meas_req_response";
+        case LOG_NR_NAS_5GMM_STATE: return "nr_nas_5gmm_state";
+        case LOG_NR_RRC_OTA: return "nr_rrc_ota_message";
+        case LOG_NR_MIB: return "nr_rrc_mib_info";
+        case LOG_NR_RRC_SCELL: return "nr_rrc_serving_cell_info";
+        case LOG_NR_RRC_CFG: return "nr_rrc_configuration_info";
+        case LOG_NR_CA: return "nr_rrc_supported_ca_combos";
+        case LOG_NR_MAC_RACH_ATTEMPT: return "nr_mac_rach_attempt";
+        case LOG_NR_ML1: return "nr_ml1_meas_database_update";
+        default: return "unknown";
+    }
+}
+
+static void track_log(uint16_t log_id, uint64_t qts) {
+    int free_slot = -1;
+    for (int i = 0; i < MAX_LOG_COUNTS; i++) {
+        if (!log_counts[i].valid) {
+            if (free_slot < 0) free_slot = i;
+            continue;
+        }
+        if (log_counts[i].log_id == log_id) {
+            log_counts[i].count++;
+            log_counts[i].last_qts = qts;
+            log_counts[i].last_seen_at = time(NULL);
+            return;
+        }
+    }
+    if (free_slot >= 0) {
+        log_counts[free_slot].valid = 1;
+        log_counts[free_slot].log_id = log_id;
+        log_counts[free_slot].count = 1;
+        log_counts[free_slot].last_qts = qts;
+        log_counts[free_slot].last_seen_at = time(NULL);
+    }
 }
 
 static uint32_t getbits32(const uint32_t *words, size_t n_words, unsigned int start, unsigned int len) {
@@ -556,6 +744,81 @@ static void write_nr_serving(FILE *f) {
             s->pci, s->dl_nr_arfcn, s->ul_nr_arfcn, s->band);
 }
 
+static void write_lte_phy(FILE *f) {
+    fputs("{\"pusch_tx_candidate\":", f);
+    if (state.pusch.valid) {
+        const lte_phy_pusch_t *p = &state.pusch;
+        fprintf(f,
+                "{\"updated_at\":%ld,\"qxdm_ts\":%llu,\"confidence\":\"timing_grant_confirmed\","
+                "\"tti\":%u,\"sfn_guess\":%u,\"subframe_guess\":%u,\"grant\":%u,"
+                "\"tx_power_raw\":%d,\"field_10_raw\":%u,\"field_34_raw\":%u,"
+                "\"field_36_raw\":%u,\"field_40_raw\":%u,\"field_42_raw\":%u,"
+                "\"field_46_raw\":%u}",
+                (long)p->updated_at, (unsigned long long)p->qts, p->tti,
+                p->sfn_guess, p->subframe_guess, p->grant, p->tx_power_raw,
+                p->field_10_raw, p->field_34_raw, p->field_36_raw,
+                p->field_40_raw, p->field_42_raw, p->field_46_raw);
+    } else {
+        fputs("{}", f);
+    }
+    fputs(",\"pdsch_stat_candidate\":", f);
+    if (state.pdsch.valid) {
+        const lte_phy_pdsch_t *p = &state.pdsch;
+        fprintf(f,
+                "{\"updated_at\":%ld,\"qxdm_ts\":%llu,\"confidence\":\"candidate_unconfirmed\","
+                "\"version\":%u,\"subversion\":%u,\"header_word\":%u,"
+                "\"record_index\":%u,\"record_count\":%u,\"tti_guess\":%u,"
+                "\"mcs_candidate_raw\":%u,\"field_0_raw\":%u,\"field_2_raw\":%u,"
+                "\"field_4_raw\":%u,\"field_8_raw\":%u,\"field_12_raw\":%u,"
+                "\"field_16_raw\":%u,\"field_18_raw\":%u,\"field_20_raw\":%u,"
+                "\"field_24_raw\":%u,\"field_28_raw\":%u}",
+                (long)p->updated_at, (unsigned long long)p->qts, p->version,
+                p->subversion, p->header_word, p->record_index, p->record_count,
+                p->tti_guess, p->mcs_candidate_raw, p->field_0_raw, p->field_2_raw,
+                p->field_4_raw, p->field_8_raw, p->field_12_raw, p->field_16_raw,
+                p->field_18_raw, p->field_20_raw, p->field_24_raw, p->field_28_raw);
+    } else {
+        fputs("{}", f);
+    }
+    fputc('}', f);
+}
+
+static void write_missing_group(FILE *f, const missing_metric_t *items, size_t count) {
+    fputc('{', f);
+    for (size_t i = 0; i < count; i++) {
+        if (i) fputc(',', f);
+        json_string(f, items[i].name);
+        fputs(":{\"value\":null,\"status\":\"not_decoded\",\"source_candidates\":[", f);
+        json_string(f, items[i].source_candidates);
+        fputs("]}", f);
+    }
+    fputc('}', f);
+}
+
+static void write_missing_metrics(FILE *f) {
+    fputs("{\"lte\":", f);
+    write_missing_group(f, lte_missing_metrics, sizeof(lte_missing_metrics) / sizeof(lte_missing_metrics[0]));
+    fputs(",\"nr\":", f);
+    write_missing_group(f, nr_missing_metrics, sizeof(nr_missing_metrics) / sizeof(nr_missing_metrics[0]));
+    fputc('}', f);
+}
+
+static void write_log_counts(FILE *f) {
+    int first = 1;
+    fputc('[', f);
+    for (int i = 0; i < MAX_LOG_COUNTS; i++) {
+        const log_count_t *c = &log_counts[i];
+        if (!c->valid) continue;
+        if (!first) fputc(',', f);
+        fprintf(f, "{\"log_id\":\"0x%04X\",\"name\":", c->log_id);
+        json_string(f, log_name(c->log_id));
+        fprintf(f, ",\"count\":%llu,\"last_seen_at\":%ld,\"last_qxdm_ts\":%llu}",
+                c->count, (long)c->last_seen_at, (unsigned long long)c->last_qts);
+        first = 0;
+    }
+    fputc(']', f);
+}
+
 static int write_snapshot(int is_running) {
     if (!snapshot_file) return 0;
     char tmp[512];
@@ -582,17 +845,34 @@ static int write_snapshot(int is_running) {
     write_lte_per_antenna(f);
     fputs(",\"mac\":", f);
     write_lte_mac(f);
+    fputs(",\"phy\":", f);
+    write_lte_phy(f);
     fputs(",\"ca\":", f);
     write_lte_ca(f);
     fputs("},\"nr\":{\"serving_cell\":", f);
     write_nr_serving(f);
     fputs(",\"layers\":[],\"ca\":{\"supported_combos\":", f);
     write_combo_state(f, &state.nr_combo);
-    fputs("}},\"runtime\":{\"running\":", f);
+    fputs("}},\"missing_metrics\":", f);
+    write_missing_metrics(f);
+    fputs(",\"runtime\":{\"running\":", f);
     fputs(is_running ? "true" : "false", f);
-    fprintf(f, ",\"uptime_s\":%ld,\"events_seen\":%llu,\"last_error\":",
-            uptime, events_seen);
+    fprintf(f, ",\"uptime_s\":%ld,\"events_seen\":%llu,"
+            "\"snapshot_interval_ms\":%d,\"sample_window_ms\":%d,"
+            "\"sample_min_ms\":%d,\"oneshot\":%s,\"require\":",
+            uptime, events_seen, snapshot_interval_ms, sample_window_ms,
+            sample_min_ms, opt_oneshot ? "true" : "false");
+    json_string(f, require_mode_name());
+    fprintf(f, ",\"sample_events_seen\":%llu,\"sample_signal_seen\":%s,"
+            "\"sample_mac_seen\":%s,\"diag_stream_active\":%s,"
+            "\"gui_lite\":%s,\"nice_increment\":%d,\"last_error\":",
+            sample_events_seen, sample_signal_seen ? "true" : "false",
+            sample_mac_seen ? "true" : "false",
+            log_stream_enabled ? "true" : "false",
+            opt_gui_lite ? "true" : "false", nice_increment);
     json_string(f, last_error);
+    fputs(",\"log_counts\":", f);
+    write_log_counts(f);
     fputs("}}\n", f);
 
     if (fflush(f) != 0) {
@@ -608,6 +888,19 @@ static int write_snapshot(int is_running) {
         return -1;
     }
     return 0;
+}
+
+static int set_log_stream_state(int client_id, uint16 logs[], int count, int enable, int *enabled_state) {
+    if (*enabled_state == enable) return 0;
+    int err = diag_log_stream_config(client_id, enable ? ENABLE : DISABLE, logs, count);
+    if (err != DIAG_DCI_NO_ERROR) {
+        snprintf(last_error, sizeof(last_error), "diag_log_stream_config %s failed err=%d errno=%d",
+                 enable ? "enable" : "disable", err, errno);
+        return err;
+    }
+    *enabled_state = enable;
+    if (enable) reset_sample_cycle();
+    return DIAG_DCI_NO_ERROR;
 }
 
 static int is_probe_scheduling_log(uint16_t log_id) {
@@ -687,6 +980,7 @@ static int parse_lte_smeas(uint16_t log_id, uint64_t qts, const uint8_t *b, size
     state.lte_serving.avg_rsrq_db = v_avg_rsrq;
     state.lte_serving.qts = qts;
     state.lte_serving.updated_at = time(NULL);
+    sample_signal_seen = 1;
     if (opt_stream_json) {
         json_prefix(log_id, qts, "LTE", "serving_cell_measurement");
         printf(",\"version\":%u,\"rrc_release\":%u,\"earfcn\":%u,\"pci\":%u,"
@@ -807,6 +1101,7 @@ static int parse_lte_smeas_resp(uint16_t log_id, uint64_t qts, const uint8_t *b,
                 a->cinr_raw[3] = cinr3;
                 a->qts = qts;
                 a->updated_at = time(NULL);
+                sample_signal_seen = 1;
                 if (opt_stream_json) {
                     json_prefix(log_id, qts, "LTE", "per_antenna_measurement");
                     printf(",\"version\":%u,\"earfcn\":%u,\"cell_index\":%u,\"valid_rx\":%u,\"rx_map\":%u,"
@@ -902,6 +1197,7 @@ static int parse_lte_rrc_scell(uint16_t log_id, uint64_t qts, const uint8_t *b, 
     snprintf(state.lte_info.mnc, sizeof(state.lte_info.mnc), "%0*u", mncd == 3 ? 3 : 2, mnc);
     state.lte_info.qts = qts;
     state.lte_info.updated_at = time(NULL);
+    sample_signal_seen = 1;
     if (opt_stream_json) {
         json_prefix(log_id, qts, "LTE", "serving_cell_info");
         printf(",\"version\":%u,\"pci\":%u,\"dl_earfcn\":%u,\"ul_earfcn\":%u,"
@@ -932,6 +1228,7 @@ static int parse_nr_rrc_scell(uint16_t log_id, uint64_t qts, const uint8_t *b, s
     state.nr_serving.band = band;
     state.nr_serving.qts = qts;
     state.nr_serving.updated_at = time(NULL);
+    sample_signal_seen = 1;
     if (opt_stream_json) {
         json_prefix(log_id, qts, "NR", "serving_cell_info");
         printf(",\"version\":\"%u.%u\",\"pci\":%u,\"dl_nr_arfcn\":%u,\"ul_nr_arfcn\":%u,\"band\":%u}\n",
@@ -990,6 +1287,7 @@ static int parse_lte_mac_v1_dl_subpacket(uint16_t log_id, uint64_t qts, uint8_t 
         m->num_lcid = 0;
         m->qts = qts;
         m->updated_at = time(NULL);
+        sample_mac_seen = 1;
         if (opt_stream_json) {
             json_prefix(log_id, qts, "LTE", "lte_mac_transport_block");
             printf(",\"version\":%u,\"direction\":\"DL\",\"sample_index\":%u,"
@@ -1063,6 +1361,7 @@ static int parse_lte_mac_v1_ul_subpacket(uint16_t log_id, uint64_t qts, uint8_t 
         m->bsr_trigger = bsr_trig;
         m->qts = qts;
         m->updated_at = time(NULL);
+        sample_mac_seen = 1;
         if (opt_stream_json) {
             json_prefix(log_id, qts, "LTE", "lte_mac_transport_block");
             printf(",\"version\":%u,\"direction\":\"UL\",\"sample_index\":%u,"
@@ -1134,6 +1433,7 @@ static int parse_lte_mac_dl_v49(uint16_t log_id, uint64_t qts, const uint8_t *b,
         m->num_lcid = num_lcid;
         m->qts = qts;
         m->updated_at = time(NULL);
+        sample_mac_seen = 1;
         if (opt_stream_json) {
             json_prefix(log_id, qts, "LTE", "lte_mac_transport_block");
             printf(",\"version\":%u,\"direction\":\"DL\",\"tb_index\":%u,"
@@ -1220,6 +1520,51 @@ static int parse_lte_phy_pusch_tx_candidate(uint16_t log_id, uint64_t qts, const
     return 1;
 }
 
+static int parse_lte_phy_pdsch_stat_candidate(uint16_t log_id, uint64_t qts, const uint8_t *b, size_t len) {
+    if (len < 44 || ((len - 4) % 40) != 0) return 0;
+    uint16_t header_word = get16(b + 2);
+    size_t count = (len - 4) / 40;
+    for (size_t i = 0; i < count; i++) {
+        const uint8_t *rec = b + 4 + i * 40;
+        state.pdsch.valid = 1;
+        state.pdsch.version = b[0];
+        state.pdsch.subversion = b[1];
+        state.pdsch.header_word = header_word;
+        state.pdsch.record_index = (uint16_t)i;
+        state.pdsch.record_count = (uint16_t)count;
+        state.pdsch.tti_guess = get16(rec);
+        state.pdsch.mcs_candidate_raw = rec[16];
+        state.pdsch.field_0_raw = get16(rec);
+        state.pdsch.field_2_raw = get16(rec + 2);
+        state.pdsch.field_4_raw = get16(rec + 4);
+        state.pdsch.field_8_raw = get16(rec + 8);
+        state.pdsch.field_12_raw = get16(rec + 12);
+        state.pdsch.field_16_raw = get16(rec + 16);
+        state.pdsch.field_18_raw = get16(rec + 18);
+        state.pdsch.field_20_raw = get16(rec + 20);
+        state.pdsch.field_24_raw = get16(rec + 24);
+        state.pdsch.field_28_raw = get16(rec + 28);
+        state.pdsch.qts = qts;
+        state.pdsch.updated_at = time(NULL);
+        if (opt_stream_json) {
+            json_prefix(log_id, qts, "LTE", "lte_phy_pdsch_stat_candidate");
+            printf(",\"version\":%u,\"subversion\":%u,\"header_word\":%u,"
+                   "\"record_index\":%zu,\"record_count\":%zu,\"tti_guess\":%u,"
+                   "\"mcs_candidate_raw\":%u,\"field_0_raw\":%u,\"field_2_raw\":%u,"
+                   "\"field_4_raw\":%u,\"field_8_raw\":%u,\"field_12_raw\":%u,"
+                   "\"field_16_raw\":%u,\"field_18_raw\":%u,\"field_20_raw\":%u,"
+                   "\"field_24_raw\":%u,\"field_28_raw\":%u,\"record_hex\":\"",
+                   b[0], b[1], header_word, i, count, get16(rec), rec[16],
+                   get16(rec), get16(rec + 2), get16(rec + 4), get16(rec + 8),
+                   get16(rec + 12), get16(rec + 16), get16(rec + 18),
+                   get16(rec + 20), get16(rec + 24), get16(rec + 28));
+            hexprint(stdout, rec, 40);
+            printf("\"}\n");
+        }
+    }
+    return 1;
+}
+
 static void parse_log_body(uint16_t log_id, uint64_t qts, const uint8_t *body, size_t body_len) {
     int parsed = 0;
     if (log_id == LOG_LTE_SMEAS) parsed = parse_lte_smeas(log_id, qts, body, body_len);
@@ -1229,6 +1574,7 @@ static void parse_log_body(uint16_t log_id, uint64_t qts, const uint8_t *body, s
     else if (log_id == LOG_LTE_MAC_DL) parsed = parse_lte_mac(log_id, qts, body, body_len, 1);
     else if (log_id == LOG_LTE_MAC_UL) parsed = parse_lte_mac(log_id, qts, body, body_len, 0);
     else if (log_id == LOG_LTE_PHY_PUSCH_TX_REPORT) parsed = parse_lte_phy_pusch_tx_candidate(log_id, qts, body, body_len);
+    else if (log_id == LOG_LTE_PHY_PDSCH_STAT_INDICATION2) parsed = parse_lte_phy_pdsch_stat_candidate(log_id, qts, body, body_len);
     else if (log_id == LOG_LTE_CA) {
         got_lte = 1;
         write_combo(combo_dir, "b0cd_qlte.hex", body, body_len);
@@ -1273,11 +1619,13 @@ static void parse_log_body(uint16_t log_id, uint64_t qts, const uint8_t *body, s
 static void on_log(unsigned char *ptr, int len) {
     if (!ptr || len < 12) return;
     events_seen++;
+    sample_events_seen++;
     uint16_t rec_len = get16(ptr);
     uint16_t log_id = get16(ptr + 2);
     uint64_t qts = get64(ptr + 4);
     if (rec_len > (uint16_t)len) rec_len = (uint16_t)len;
     if (rec_len < 12) return;
+    track_log(log_id, qts);
     parse_log_body(log_id, qts, ptr + 12, rec_len - 12);
 }
 
@@ -1293,7 +1641,10 @@ static void usage(const char *argv0) {
     fprintf(stderr,
         "Usage: %s [--seconds N] [--proc msm|mdm|auto] [--debug] [--raw]\n"
         "          [--mac] [--probe-scheduling] [--probe-phy] [--combo-dir DIR]\n"
+        "          [--gui-lite] [--full-logset] [--oneshot]\n"
+        "          [--require any|signal|signal-mac|mac] [--sample-min-ms N]\n"
         "          [--snapshot-file PATH] [--snapshot-interval-ms N]\n"
+        "          [--sample-window-ms N] [--nice N]\n"
         "          [--stale-after-ms N] [--no-raw-log] [--max-runtime-sec N]\n"
         "          [--wait-uecap lte|nr|both]\n", argv0);
 }
@@ -1316,6 +1667,13 @@ int main(int argc, char **argv) {
         {"no-raw-log", no_argument, 0, 10},
         {"max-runtime-sec", required_argument, 0, 11},
         {"stale-after-ms", required_argument, 0, 12},
+        {"sample-window-ms", required_argument, 0, 13},
+        {"nice", required_argument, 0, 14},
+        {"oneshot", no_argument, 0, 15},
+        {"require", required_argument, 0, 16},
+        {"sample-min-ms", required_argument, 0, 17},
+        {"gui-lite", no_argument, 0, 18},
+        {"full-logset", no_argument, 0, 19},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
@@ -1337,15 +1695,47 @@ int main(int argc, char **argv) {
         else if (c == 10) opt_no_raw_log = 1;
         else if (c == 11) seconds = atoi(optarg);
         else if (c == 12) stale_after_ms = atoi(optarg);
+        else if (c == 13) sample_window_ms = atoi(optarg);
+        else if (c == 14) nice_increment = atoi(optarg);
+        else if (c == 15) opt_oneshot = 1;
+        else if (c == 16) {
+            if (!strcmp(optarg, "any")) require_mode = REQUIRE_ANY;
+            else if (!strcmp(optarg, "mac")) require_mode = REQUIRE_MAC;
+            else if (!strcmp(optarg, "signal-mac")) require_mode = REQUIRE_SIGNAL_MAC;
+            else if (!strcmp(optarg, "signal")) require_mode = REQUIRE_SIGNAL;
+            else { usage(argv[0]); return 2; }
+        }
+        else if (c == 17) sample_min_ms = atoi(optarg);
+        else if (c == 18) opt_gui_lite = 1;
+        else if (c == 19) opt_full_logset = 1;
         else { usage(argv[0]); return c == 'h' ? 0 : 2; }
     }
     if (snapshot_interval_ms <= 0) snapshot_interval_ms = 10000;
     if (stale_after_ms <= 0) stale_after_ms = 30000;
+    if (sample_min_ms < 0) sample_min_ms = 0;
     if (snapshot_file) {
         opt_stream_json = 0;
         opt_no_raw_log = 1;
+        if (!opt_full_logset && !opt_probe_scheduling && !opt_probe_phy) opt_gui_lite = 1;
+        if (opt_oneshot && seconds <= 0) seconds = stale_after_ms > 0 ? (stale_after_ms + 999) / 1000 : 10;
+        if (sample_window_ms < 0) {
+            if (opt_oneshot) sample_window_ms = seconds > 0 ? seconds * 1000 : snapshot_interval_ms;
+            else sample_window_ms = 2000;
+        }
+        if (nice_increment == 0) nice_increment = 5;
     }
+    if (sample_window_ms < 0) sample_window_ms = 0;
+    if (sample_window_ms > snapshot_interval_ms) sample_window_ms = snapshot_interval_ms;
     runtime_start = time(NULL);
+    if (nice_increment > 0) {
+        errno = 0;
+        int cur_prio = getpriority(PRIO_PROCESS, 0);
+        if (errno == 0) {
+            int new_prio = cur_prio + nice_increment;
+            if (new_prio > 19) new_prio = 19;
+            setpriority(PRIO_PROCESS, 0, new_prio);
+        }
+    }
 
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
@@ -1396,21 +1786,29 @@ int main(int argc, char **argv) {
 
     uint16 logs[64];
     int count = 0;
-    logs[count++] = LOG_LTE_SMEAS;
-    logs[count++] = LOG_LTE_NMEAS;
-    logs[count++] = LOG_LTE_SMEAS_RESP;
-    logs[count++] = LOG_LTE_CELL_INFO;
-    logs[count++] = LOG_LTE_RRC_OTA;
-    logs[count++] = LOG_LTE_RRC_MIB;
-    logs[count++] = LOG_LTE_RRC_SCELL;
-    logs[count++] = LOG_LTE_CA;
-    logs[count++] = LOG_NR_NAS_5GMM_STATE;
-    logs[count++] = LOG_NR_RRC_OTA;
-    logs[count++] = LOG_NR_MIB;
-    logs[count++] = LOG_NR_RRC_SCELL;
-    logs[count++] = LOG_NR_RRC_CFG;
-    logs[count++] = LOG_NR_CA;
-    logs[count++] = LOG_NR_ML1;
+    if (opt_gui_lite) {
+        logs[count++] = LOG_LTE_SMEAS;
+        logs[count++] = LOG_LTE_SMEAS_RESP;
+        logs[count++] = LOG_LTE_RRC_SCELL;
+        logs[count++] = LOG_NR_RRC_SCELL;
+        logs[count++] = LOG_NR_ML1;
+    } else {
+        logs[count++] = LOG_LTE_SMEAS;
+        logs[count++] = LOG_LTE_NMEAS;
+        logs[count++] = LOG_LTE_SMEAS_RESP;
+        logs[count++] = LOG_LTE_CELL_INFO;
+        logs[count++] = LOG_LTE_RRC_OTA;
+        logs[count++] = LOG_LTE_RRC_MIB;
+        logs[count++] = LOG_LTE_RRC_SCELL;
+        logs[count++] = LOG_LTE_CA;
+        logs[count++] = LOG_NR_NAS_5GMM_STATE;
+        logs[count++] = LOG_NR_RRC_OTA;
+        logs[count++] = LOG_NR_MIB;
+        logs[count++] = LOG_NR_RRC_SCELL;
+        logs[count++] = LOG_NR_RRC_CFG;
+        logs[count++] = LOG_NR_CA;
+        logs[count++] = LOG_NR_ML1;
+    }
     if (mac) {
         logs[count++] = LOG_LTE_MAC_DL;
         logs[count++] = LOG_LTE_MAC_UL;
@@ -1443,36 +1841,80 @@ int main(int argc, char **argv) {
         logs[count++] = LOG_LTE_PHY_RI_REPORT;
         logs[count++] = LOG_LTE_PHY_PMI_REPORT;
     }
-    err = diag_log_stream_config(client_id, ENABLE, logs, count);
+    err = set_log_stream_state(client_id, logs, count, 1, &log_stream_enabled);
     if (err != DIAG_DCI_NO_ERROR) {
         fprintf(stderr, "diag_log_stream_config enable failed err=%d errno=%d\n", err, errno);
-        snprintf(last_error, sizeof(last_error), "diag_log_stream_config enable failed err=%d errno=%d", err, errno);
     }
 
     time_t start = time(NULL);
-    uint64_t next_snapshot_ms = monotonic_ms() + (uint64_t)snapshot_interval_ms;
+    uint64_t loop_start_ms = monotonic_ms();
+    uint64_t cycle_anchor_ms = loop_start_ms;
+    uint64_t next_snapshot_ms = loop_start_ms + (uint64_t)snapshot_interval_ms;
+    int exit_code = 0;
     if (snapshot_file) write_snapshot(1);
     while (running) {
+        uint64_t now_ms = monotonic_ms();
+        uint64_t sample_elapsed_ms = sample_started_ms ? now_ms - sample_started_ms : 0;
+        int have_enough = sample_has_enough_data();
+        if (snapshot_file && sample_window_ms > 0) {
+            uint64_t elapsed = now_ms - cycle_anchor_ms;
+            int new_cycle = 0;
+            while (elapsed >= (uint64_t)snapshot_interval_ms) {
+                cycle_anchor_ms += (uint64_t)snapshot_interval_ms;
+                elapsed = now_ms - cycle_anchor_ms;
+                new_cycle = 1;
+            }
+            if (new_cycle) {
+                reset_sample_cycle();
+                sample_elapsed_ms = 0;
+                have_enough = 0;
+            }
+            int should_enable = elapsed < (uint64_t)sample_window_ms;
+            if (should_enable && have_enough && sample_elapsed_ms >= (uint64_t)sample_min_ms) {
+                should_enable = 0;
+                if (log_stream_enabled && !opt_oneshot) write_snapshot(1);
+            }
+            set_log_stream_state(client_id, logs, count, should_enable, &log_stream_enabled);
+        }
+        if (opt_oneshot && have_enough && sample_elapsed_ms >= (uint64_t)sample_min_ms) break;
+        if (opt_oneshot && sample_window_ms > 0 &&
+            sample_started_ms && sample_elapsed_ms >= (uint64_t)sample_window_ms &&
+            !have_enough) {
+            snprintf(last_error, sizeof(last_error),
+                     "sample timeout: require=%s not seen in %d ms",
+                     require_mode_name(), sample_window_ms);
+            exit_code = 2;
+            break;
+        }
         if (snapshot_file) {
-            uint64_t now_ms = monotonic_ms();
             if (now_ms >= next_snapshot_ms) {
                 write_snapshot(1);
-                next_snapshot_ms = now_ms + (uint64_t)snapshot_interval_ms;
+                do {
+                    next_snapshot_ms += (uint64_t)snapshot_interval_ms;
+                } while (now_ms >= next_snapshot_ms);
             }
         }
-        if (seconds > 0 && time(NULL) - start >= seconds) break;
+        if (seconds > 0 && time(NULL) - start >= seconds) {
+            if (opt_oneshot && !sample_has_enough_data()) {
+                snprintf(last_error, sizeof(last_error),
+                         "sample timeout: require=%s not seen in %d sec",
+                         require_mode_name(), seconds);
+                exit_code = 2;
+            }
+            break;
+        }
         if (wait) {
             if ((!strcmp(wait, "lte") && got_lte) || (!strcmp(wait, "nr") && got_nr) ||
                 (!strcmp(wait, "both") && got_lte && got_nr)) break;
         }
-        sleep(1);
+        sleep_ms(snapshot_file && sample_window_ms > 0 ? 100 : 500);
     }
 
-    diag_log_stream_config(client_id, DISABLE, logs, count);
+    set_log_stream_state(client_id, logs, count, 0, &log_stream_enabled);
     diag_disable_all_logs(client_id);
     diag_deregister_dci_signal_data(client_id, dci_sig);
     diag_release_dci_client(&client_id);
     Diag_LSM_DeInit();
     if (snapshot_file) write_snapshot(0);
-    return 0;
+    return exit_code;
 }

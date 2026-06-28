@@ -63,6 +63,18 @@ class StateTests(unittest.TestCase):
         self.assertIn("earfcn=100|pci=10|cell=0", snap["lte"]["per_antenna"])
         self.assertIn("earfcn=200|pci=20|cell=0", snap["lte"]["per_antenna"])
 
+    def test_lte_phy_candidates_are_grouped(self):
+        state = MetricsState()
+        state.update({
+            "event": "lte_phy_pdsch_stat_candidate",
+            "rat": "LTE",
+            "mcs_candidate_raw": 18,
+            "confidence": "candidate_unconfirmed",
+        })
+        snap = state.snapshot()
+        self.assertEqual(snap["lte"]["phy"]["pdsch_stat"]["mcs_candidate_raw"], 18)
+        self.assertEqual(snap["lte"]["phy"]["pdsch_stat"]["confidence"], "candidate_unconfirmed")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -52,7 +52,7 @@ PYTHONPATH=src python3 -m qdiagparser capture -d /dev/ttyUSB2 --configure --stop
 
 The modems do not ship `python3`, so the repo also builds native ARM hard-float binaries.
 
-`qdiagmon-dci` is the preferred modem-side runtime when `/dev/diag` and `libdiag.so.1` are present, as on the T99W175. For the WebUI, run it in low-resource snapshot mode: it keeps the latest decoded state in memory and atomically overwrites one small JSON file.
+`qdiagmon-dci` is the preferred modem-side runtime when `/dev/diag` and `libdiag.so.1` are present, as on the T99W175. For the WebUI, prefer on-demand low-resource snapshot mode: the GUI/CGI serves the existing JSON while fresh, and only starts the binary when the snapshot is stale.
 
 ```bash
 make dci-docker MODEM_SYSROOT="/home/manu/Scrivania/Esim t99/analysis_work/extract/2024_system/rootfs"
@@ -60,10 +60,15 @@ adb push build/qdiagmon-dci-armhf /tmp/qdiagmon-dci
 adb shell 'chmod +x /tmp/qdiagmon-dci'
 adb shell '/tmp/qdiagmon-dci --snapshot-file /tmp/qdiag-state.json \
   --snapshot-interval-ms 10000 \
-  --no-raw-log \
-  --max-runtime-sec 600 \
+  --stale-after-ms 30000 \
+  --oneshot \
+  --require signal \
+  --sample-min-ms 500 \
+  --max-runtime-sec 10 \
   --mac \
-  --combo-dir /tmp/qdiag-combos >/dev/null 2>/tmp/qdiag-state.err &'
+  --gui-lite \
+  --no-raw-log \
+  >/dev/null 2>/tmp/qdiag-state.err; cat /tmp/qdiag-state.json'
 ```
 
 Snapshot mode writes `/tmp/qdiag-state.json.tmp` and renames it over `/tmp/qdiag-state.json`, so the CGI can serve the state without parsing large logs:
@@ -75,7 +80,9 @@ cat /tmp/qdiag-state.json 2>/dev/null || \
   printf '{"updated_at":0,"stale_after_ms":30000,"lte":{"serving_cell":{},"per_antenna":[],"mac":{},"ca":{}},"nr":{"layers":[],"ca":{}},"runtime":{"running":false,"uptime_s":0,"events_seen":0,"last_error":"no snapshot yet"}}\n'
 ```
 
-The GUI should poll every 10000 ms and mark data stale after 30000 ms. Do not delete the snapshot after each request; it is intentionally overwritten in place to avoid races and NAND churn.
+The GUI should poll every 10000 ms and mark data stale after 30000 ms. Do not delete the snapshot after each request; it is intentionally overwritten in place to avoid races and NAND churn. In `--oneshot` mode, if the required packet is not seen within `--max-runtime-sec`, the binary writes a final snapshot with `runtime.last_error` and exits non-zero.
+
+If a resident process is needed instead of on-demand CGI refresh, keep the same snapshot options and omit `--oneshot`. Snapshot mode defaults to `--gui-lite`, `--sample-window-ms 2000`, and `--nice 5`; it also pauses DIAG early when the required fresh data arrives.
 
 For development captures, JSONL stream mode is still available:
 

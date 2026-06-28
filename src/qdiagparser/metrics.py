@@ -76,6 +76,7 @@ class MetricsParser:
             0xB063: self.lte_mac_dl_transport_block,
             0xB064: self.lte_mac_ul_transport_block,
             0xB139: self.lte_phy_pusch_tx_candidate,
+            0xB173: self.lte_phy_pdsch_stat_candidate,
             0xB17F: self.lte_ml1_serving_cell_meas,
             0xB180: self.lte_ml1_neighbor_measurements,
             0xB193: self.lte_ml1_serving_cell_meas_response,
@@ -155,6 +156,39 @@ class MetricsParser:
                 "field_40_raw": struct.unpack_from("<H", rec, 40)[0],
                 "field_42_raw": struct.unpack_from("<H", rec, 42)[0],
                 "field_46_raw": struct.unpack_from("<H", rec, 46)[0],
+                "record_hex": rec.hex(),
+            })
+            events.append(event)
+        return events
+
+    def lte_phy_pdsch_stat_candidate(self, pkt: DiagLogPacket) -> list[dict[str, Any]]:
+        body = pkt.body
+        if len(body) < 44 or (len(body) - 4) % 40:
+            return [warn(pkt, f"unexpected LTE PHY PDSCH stat candidate length {len(body)}")]
+        header_word = struct.unpack_from("<H", body, 2)[0]
+        events: list[dict[str, Any]] = []
+        for index, pos in enumerate(range(4, len(body), 40)):
+            rec = body[pos:pos + 40]
+            event = base(pkt, "lte_phy_pdsch_stat_candidate", "LTE")
+            event.update({
+                "version": body[0],
+                "subversion": body[1],
+                "header_word": header_word,
+                "record_index": index,
+                "record_count": (len(body) - 4) // 40,
+                "tti_guess": struct.unpack_from("<H", rec, 0)[0],
+                "mcs_candidate_raw": rec[16],
+                "field_0_raw": struct.unpack_from("<H", rec, 0)[0],
+                "field_2_raw": struct.unpack_from("<H", rec, 2)[0],
+                "field_4_raw": struct.unpack_from("<H", rec, 4)[0],
+                "field_8_raw": struct.unpack_from("<H", rec, 8)[0],
+                "field_12_raw": struct.unpack_from("<H", rec, 12)[0],
+                "field_16_raw": struct.unpack_from("<H", rec, 16)[0],
+                "field_18_raw": struct.unpack_from("<H", rec, 18)[0],
+                "field_20_raw": struct.unpack_from("<H", rec, 20)[0],
+                "field_24_raw": struct.unpack_from("<H", rec, 24)[0],
+                "field_28_raw": struct.unpack_from("<H", rec, 28)[0],
+                "confidence": "candidate_unconfirmed",
                 "record_hex": rec.hex(),
             })
             events.append(event)

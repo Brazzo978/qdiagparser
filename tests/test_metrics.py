@@ -40,6 +40,27 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(event["format"], "QLTE")
         self.assertEqual(event["payload_hex"], "1800616263")
 
+    def test_lte_phy_pdsch_stat_candidate(self):
+        rec = bytearray(40)
+        struct.pack_into("<H", rec, 0, 1234)
+        struct.pack_into("<H", rec, 2, 0x22)
+        struct.pack_into("<H", rec, 4, 0x44)
+        struct.pack_into("<H", rec, 8, 0x88)
+        struct.pack_into("<H", rec, 12, 0x120)
+        rec[16] = 18
+        struct.pack_into("<H", rec, 18, 0x180)
+        struct.pack_into("<H", rec, 20, 0x200)
+        struct.pack_into("<H", rec, 24, 0x240)
+        struct.pack_into("<H", rec, 28, 0x280)
+        body = bytes([0xA1, 0x01]) + struct.pack("<H", 77) + bytes(rec)
+        pkt = DiagLogPacket(0xB173, parse_qxdm_ts(0), 0, body)
+        event = MetricsParser().parse(pkt)[0]
+        self.assertEqual(event["event"], "lte_phy_pdsch_stat_candidate")
+        self.assertEqual(event["record_count"], 1)
+        self.assertEqual(event["tti_guess"], 1234)
+        self.assertEqual(event["mcs_candidate_raw"], 18)
+        self.assertEqual(event["confidence"], "candidate_unconfirmed")
+
 
 if __name__ == "__main__":
     unittest.main()

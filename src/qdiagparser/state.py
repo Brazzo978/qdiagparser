@@ -104,6 +104,8 @@ class MetricsState:
                     self._refresh_lte_ca_observed()
             elif name == "lte_phy_pusch_tx_candidate":
                 self.latest["lte"].setdefault("phy", {})["pusch_tx"] = event
+            elif name == "lte_phy_pdsch_stat_candidate":
+                self.latest["lte"].setdefault("phy", {})["pdsch_stat"] = event
             elif name == "per_antenna_measurement":
                 key = self._cell_key(event)
                 self.latest["lte"].setdefault("per_antenna", {})[key] = event
