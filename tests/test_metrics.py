@@ -122,6 +122,41 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(event["crc_fail_total"], 0)
         self.assertEqual(event["dl_bler"], 0.0)
 
+    def test_nr_mac_ul_tb_stats_v21_layout(self):
+        header = bytearray(20)
+        struct.pack_into("<HH", header, 0, 1, 2)
+        header[15] = 1
+        rec = bytearray(96)
+        struct.pack_into("<QQQQQQ", rec, 0, 32019, 2618, 1621, 609, 1624, 0)
+        struct.pack_into("<IIIIIIIIIIHH", rec, 48, 106, 11, 0, 0, 0, 0, 101, 0, 117, 0, 230, 0)
+        pkt = DiagLogPacket(0xB881, parse_qxdm_ts(0), 0, bytes(header + rec))
+        event = MetricsParser().parse(pkt)[0]
+        self.assertEqual(event["event"], "nr_mac_ul_tb_stats")
+        self.assertEqual(event["confidence"], "layout_v2_1_decoded")
+        self.assertEqual(event["tb_new_tx_bytes"], 32019)
+        self.assertEqual(event["num_retx_tb"], 11)
+        self.assertEqual(event["avg_mcs_candidate"], 13.85)
+        self.assertEqual(event["avg_prb_candidate"], 5.21)
+        self.assertEqual(event["avg_phr_candidate"], 16.08)
+        self.assertEqual(event["pcmax_dbm_candidate"], 23.0)
+
+    def test_nr_mac_pdsch_stats_v22_layout(self):
+        header = bytearray(28)
+        struct.pack_into("<HH", header, 0, 2, 2)
+        header[15] = 1
+        rec = bytearray(72)
+        struct.pack_into("<IIIIIIIIQQQQQ", rec, 0, 0, 5490, 6, 5, 1, 2, 0, 0, 712, 100, 812, 429, 200)
+        pkt = DiagLogPacket(0xB888, parse_qxdm_ts(0), 0, bytes(header + rec))
+        event = MetricsParser().parse(pkt)[0]
+        self.assertEqual(event["event"], "nr_mac_pdsch_stats")
+        self.assertEqual(event["confidence"], "layout_v2_2_decoded")
+        self.assertEqual(event["carrier_id"], 0)
+        self.assertEqual(event["num_crc_pass_tb"], 5)
+        self.assertEqual(event["num_crc_fail_tb"], 1)
+        self.assertEqual(event["dl_bler"], 0.1667)
+        self.assertEqual(event["retx_ratio"], 0.3333)
+        self.assertEqual(event["byte_error_ratio"], 0.1232)
+
 
 if __name__ == "__main__":
     unittest.main()

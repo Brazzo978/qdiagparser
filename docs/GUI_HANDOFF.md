@@ -85,6 +85,10 @@ The snapshot is intentionally compact and GUI-ready:
   "nr": {
     "serving_cell": {},
     "layers": [],
+    "mac": {
+      "ul_tb_stats": {},
+      "pdsch_stats_by_cc": []
+    },
     "ca": {
       "supported_combos": {}
     }
@@ -205,6 +209,8 @@ Important nested keys:
 - `lte.ca.observed_cc_ids[]`: component carriers observed from MAC activity, already normalized for 2CA/3CA/4CA views.
 - `nr.serving_cell`: latest NR serving cell info when emitted by the modem.
 - `nr.layers[]`: latest NR ML1 layer/cell/beam metrics decoded from `0xB97F`.
+- `nr.mac.ul_tb_stats`: latest NR `0xB881` UL TB aggregate stats.
+- `nr.mac.pdsch_stats_by_cc[]`: latest NR `0xB888` DL PDSCH aggregate stats, keyed by `carrier_id`.
 - `runtime.log_counts[]`: per-log counters for the current run, useful in probe/debug views to see which candidate logs are alive.
 
 ## Stable Events
@@ -293,6 +299,38 @@ The modem-side C runtime currently decodes NR ML1 versions `2.7`, `2.9`, `2.10`,
 
 Some Qualcomm summary fields can be sentinel/invalid even when cell and beam data is good. If a layer shows `serving_pci:65535`, `serving_cell_index:255`, `rfic_id:65535`, `subarray:65535`, or summary RSRP `0.00`, render those as unknown and prefer `cells[].beams[]` for the visible NR signal values.
 
+### `nr_mac_ul_tb_stats`
+
+Source: NR `0xB881`.
+
+Use for NR UL aggregate cards:
+
+- `tb_new_tx_bytes`, `tb_retx_bytes`
+- `num_new_tx_tb`, `num_retx_tb`, `retx_tb_ratio`
+- `num_mcs`, `avg_mcs_candidate`
+- `num_prb`, `avg_prb_candidate`
+- `phr`, `avg_phr_candidate`, `pcmax_dbm_candidate`
+- `num_ulsch_sched`, `num_no_ulsch_sched`, `ulsch_sched_ratio`
+- `num_cqi`, `cqi`, `avg_cqi_candidate`, `num_ri`, `ri`, `avg_ri_candidate`
+
+This is an aggregate/stats log, not the per-slot grant. Show the `avg_*_candidate` fields as aggregate estimates, not as current-slot MCS/RB/CQI. For current UL scheduling and modulation, continue with `0xB883` once its bitfield layout is promoted from raw candidate.
+
+### `nr_mac_pdsch_stats`
+
+Source: NR `0xB888`.
+
+Use for NR DL aggregate cards:
+
+- `carrier_id`
+- `num_pdsch_decode`
+- `num_crc_pass_tb`, `num_crc_fail_tb`, `dl_bler`
+- `num_retx`, `retx_ratio`
+- `harq_failure`, `ack_as_nack`
+- `crc_pass_tb_bytes`, `crc_fail_tb_bytes`, `byte_error_ratio`
+- `tb_bytes`, `padding_bytes`, `retx_bytes`
+
+This log gives DL BLER/retransmission/byte counters. It does not provide per-TB DL MCS/RB/modulation; keep those placeholders until an NR DL scheduling/status log such as `0xB886`/`0xB887` is decoded.
+
 ## Missing Metric Placeholders
 
 The GUI must render these as unavailable/pending, not zero:
@@ -304,10 +342,10 @@ The GUI must render these as unavailable/pending, not zero:
 - LTE: `bler`, `tx_power_dbm`
 - NR: `dl_mcs`, `ul_mcs`
 - NR: `dl_modulation`, `ul_modulation`
-- NR: `dl_rb_alloc`, `ul_rb_alloc`
+- NR: per-slot `dl_rb_alloc`, `ul_rb_alloc`
 - NR: `ss_rsrp_dbm`, `ss_rsrq_db`, `ss_sinr_db`
 - NR: `per_rx_rsrp_dbm`, `per_rx_sinr_db`
-- NR: `nr_mode`, `endc_anchor`, `rank_ri`, `cqi`, `tx_power_dbm`
+- NR: `nr_mode`, `endc_anchor`, per-slot `rank_ri`, per-slot `cqi`, `tx_power_dbm`
 
 Each placeholder has:
 
@@ -343,6 +381,7 @@ Validated on T99W175:
 - Resident duty-cycle mode was live-tested with `--sample-window-ms 2000 --sample-min-ms 500 --max-runtime-sec 12 --mac --gui-lite`: it saw 14 DIAG events total, wrote a 4.4 KB snapshot, and ended with `runtime.diag_stream_active:false`.
 - Failure behavior was live-tested with `--oneshot --require mac --max-runtime-sec 3 --gui-lite` without `--mac`: it exited with code `2`, wrote `runtime.last_error:"sample timeout: require=mac not seen in 3000 ms"`, and left no running process.
 - NR on-demand mode was live-tested with `--oneshot --require nr --sample-min-ms 500 --max-runtime-sec 10 --gui-lite --no-raw-log`: it exited in about 2 seconds, wrote a 5.5 KB snapshot, saw `runtime.sample_nr_seen:true`, counted one `0xB97F`, and populated `nr.layers[0]` with `nr_arfcn:645312` plus cells/beams for PCI `499` and `825`.
+- Good-SIM NR/MAC mode was live-tested with `--oneshot --require nr --sample-min-ms 9000 --max-runtime-sec 10 --mac --probe-phy --gui-lite --no-raw-log`: it exited in 9 seconds, wrote an 11 KB snapshot, stdout/stderr stayed at 0 bytes, saw `0xB881:1355`, `0xB888:1354`, `0xB883:573`, `0xB97F:45`, and populated `nr.mac.ul_tb_stats` plus `nr.mac.pdsch_stats_by_cc[0]`.
 - Forced Hetzner download through `enx00e04c6802a5` produced LTE MAC DL/UL events.
 - QLTE and QNR combo payloads were captured as `b0cd_qlte.hex` and `b826_qnr.hex`.
 - `--probe-scheduling` was tested; it produced measurement/search/RACH candidates, not confirmed MCS/RB/modulation.

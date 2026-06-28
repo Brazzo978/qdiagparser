@@ -121,6 +121,12 @@ class MetricsState:
                     cc_id = layer.get("cc_id")
                     if cc_id is not None:
                         self.latest["nr"].setdefault("layers_by_cc", {})[str(cc_id)] = layer
+            elif name == "nr_mac_ul_tb_stats":
+                self.latest["nr"].setdefault("mac", {})["ul_tb_stats"] = event
+            elif name == "nr_mac_pdsch_stats":
+                mac = self.latest["nr"].setdefault("mac", {})
+                mac["pdsch_stats"] = event
+                mac.setdefault("pdsch_stats_by_cc", {})[self._carrier_key(event)] = event
 
     def snapshot(self) -> dict[str, Any]:
         data = copy.deepcopy(self.latest)

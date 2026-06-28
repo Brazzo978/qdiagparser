@@ -378,6 +378,69 @@ typedef struct {
 
 typedef struct {
     int valid;
+    uint16_t major;
+    uint16_t minor;
+    uint16_t record_index;
+    uint16_t record_count;
+    uint64_t tb_new_tx_bytes;
+    uint64_t tb_retx_bytes;
+    uint64_t num_mcs;
+    uint64_t num_prb;
+    uint64_t phr;
+    uint64_t total_power;
+    uint32_t num_new_tx_tb;
+    uint32_t num_retx_tb;
+    uint32_t num_dtx;
+    uint32_t num_ri;
+    uint32_t ri;
+    uint32_t num_cqi;
+    uint32_t cqi;
+    uint32_t num_phr;
+    uint32_t tpc_accum;
+    uint32_t num_ulsch_sched;
+    uint32_t num_no_ulsch_sched;
+    uint16_t pcmax_raw;
+    uint16_t flush_gap_count;
+    double avg_mcs_candidate;
+    double avg_prb_candidate;
+    double avg_phr_candidate;
+    double avg_ri_candidate;
+    double avg_cqi_candidate;
+    double retx_tb_ratio;
+    double ulsch_sched_ratio;
+    double pcmax_dbm_candidate;
+    uint64_t qts;
+    time_t updated_at;
+} nr_mac_ul_tb_stats_t;
+
+typedef struct {
+    int valid;
+    uint16_t major;
+    uint16_t minor;
+    uint16_t record_index;
+    uint16_t record_count;
+    uint32_t carrier_id;
+    uint32_t num_slots_elapsed;
+    uint32_t num_pdsch_decode;
+    uint32_t num_crc_pass_tb;
+    uint32_t num_crc_fail_tb;
+    uint32_t num_retx;
+    uint32_t ack_as_nack;
+    uint32_t harq_failure;
+    uint64_t crc_pass_tb_bytes;
+    uint64_t crc_fail_tb_bytes;
+    uint64_t tb_bytes;
+    uint64_t padding_bytes;
+    uint64_t retx_bytes;
+    double dl_bler;
+    double byte_error_ratio;
+    double retx_ratio;
+    uint64_t qts;
+    time_t updated_at;
+} nr_mac_pdsch_stats_t;
+
+typedef struct {
+    int valid;
     char format[8];
     char path[512];
     size_t bytes;
@@ -408,6 +471,8 @@ typedef struct {
     uint64_t nr_ml1_qts;
     time_t nr_ml1_updated_at;
     nr_layer_t nr_layers[MAX_NR_LAYERS];
+    nr_mac_ul_tb_stats_t nr_ul_tb_stats;
+    nr_mac_pdsch_stats_t nr_pdsch_stats[MAX_LTE_CC];
     combo_state_t lte_combo;
     combo_state_t nr_combo;
 } snapshot_state_t;
@@ -666,6 +731,10 @@ static uint32_t getbits32(const uint32_t *words, size_t n_words, unsigned int st
 static uint32_t bitu32(uint32_t value, unsigned int start, unsigned int len) {
     if (!len || len >= 32) return value >> start;
     return (value >> start) & ((1U << len) - 1U);
+}
+
+static double div0(double num, double den) {
+    return den > 0.0 ? num / den : 0.0;
 }
 
 static void on_signal(int sig) {
@@ -969,6 +1038,85 @@ static void write_nr_layers(FILE *f) {
     fputc(']', f);
 }
 
+static void write_nr_ul_tb_stats(FILE *f) {
+    if (!state.nr_ul_tb_stats.valid) {
+        fputs("{}", f);
+        return;
+    }
+    const nr_mac_ul_tb_stats_t *s = &state.nr_ul_tb_stats;
+    fprintf(f,
+            "{\"updated_at\":%ld,\"qxdm_ts\":%llu,"
+            "\"confidence\":\"layout_v%u_%u_decoded\","
+            "\"version\":\"%u.%u\",\"record_index\":%u,\"record_count\":%u,"
+            "\"tb_new_tx_bytes\":%llu,\"tb_retx_bytes\":%llu,"
+            "\"num_mcs\":%llu,\"avg_mcs_candidate\":%.2f,"
+            "\"num_prb\":%llu,\"avg_prb_candidate\":%.2f,"
+            "\"phr\":%llu,\"avg_phr_candidate\":%.2f,"
+            "\"total_power\":%llu,\"num_new_tx_tb\":%u,"
+            "\"num_retx_tb\":%u,\"retx_tb_ratio\":%.4f,"
+            "\"num_dtx\":%u,\"num_ri\":%u,\"ri\":%u,"
+            "\"avg_ri_candidate\":%.2f,\"num_cqi\":%u,\"cqi\":%u,"
+            "\"avg_cqi_candidate\":%.2f,\"num_phr\":%u,"
+            "\"tpc_accum\":%u,\"num_ulsch_sched\":%u,"
+            "\"num_no_ulsch_sched\":%u,\"ulsch_sched_ratio\":%.4f,"
+            "\"pcmax_raw\":%u,\"pcmax_dbm_candidate\":%.1f,"
+            "\"flush_gap_count\":%u}",
+            (long)s->updated_at, (unsigned long long)s->qts,
+            s->major, s->minor, s->major, s->minor, s->record_index,
+            s->record_count, (unsigned long long)s->tb_new_tx_bytes,
+            (unsigned long long)s->tb_retx_bytes,
+            (unsigned long long)s->num_mcs, s->avg_mcs_candidate,
+            (unsigned long long)s->num_prb, s->avg_prb_candidate,
+            (unsigned long long)s->phr, s->avg_phr_candidate,
+            (unsigned long long)s->total_power, s->num_new_tx_tb,
+            s->num_retx_tb, s->retx_tb_ratio, s->num_dtx, s->num_ri,
+            s->ri, s->avg_ri_candidate, s->num_cqi, s->cqi,
+            s->avg_cqi_candidate, s->num_phr, s->tpc_accum,
+            s->num_ulsch_sched, s->num_no_ulsch_sched,
+            s->ulsch_sched_ratio, s->pcmax_raw, s->pcmax_dbm_candidate,
+            s->flush_gap_count);
+}
+
+static void write_nr_pdsch_stats_item(FILE *f, const nr_mac_pdsch_stats_t *s) {
+    fprintf(f,
+            "{\"updated_at\":%ld,\"qxdm_ts\":%llu,"
+            "\"confidence\":\"layout_v%u_%u_decoded\","
+            "\"version\":\"%u.%u\",\"record_index\":%u,\"record_count\":%u,"
+            "\"carrier_id\":%u,\"num_slots_elapsed\":%u,"
+            "\"num_pdsch_decode\":%u,\"num_crc_pass_tb\":%u,"
+            "\"num_crc_fail_tb\":%u,\"dl_bler\":%.4f,"
+            "\"num_retx\":%u,\"retx_ratio\":%.4f,"
+            "\"ack_as_nack\":%u,\"harq_failure\":%u,"
+            "\"crc_pass_tb_bytes\":%llu,\"crc_fail_tb_bytes\":%llu,"
+            "\"byte_error_ratio\":%.4f,\"tb_bytes\":%llu,"
+            "\"padding_bytes\":%llu,\"retx_bytes\":%llu}",
+            (long)s->updated_at, (unsigned long long)s->qts,
+            s->major, s->minor, s->major, s->minor, s->record_index,
+            s->record_count, s->carrier_id, s->num_slots_elapsed,
+            s->num_pdsch_decode, s->num_crc_pass_tb, s->num_crc_fail_tb,
+            s->dl_bler, s->num_retx, s->retx_ratio, s->ack_as_nack,
+            s->harq_failure, (unsigned long long)s->crc_pass_tb_bytes,
+            (unsigned long long)s->crc_fail_tb_bytes, s->byte_error_ratio,
+            (unsigned long long)s->tb_bytes,
+            (unsigned long long)s->padding_bytes,
+            (unsigned long long)s->retx_bytes);
+}
+
+static void write_nr_mac(FILE *f) {
+    fputs("{\"ul_tb_stats\":", f);
+    write_nr_ul_tb_stats(f);
+    fputs(",\"pdsch_stats_by_cc\":[", f);
+    int first = 1;
+    for (int i = 0; i < MAX_LTE_CC; i++) {
+        const nr_mac_pdsch_stats_t *s = &state.nr_pdsch_stats[i];
+        if (!s->valid) continue;
+        if (!first) fputc(',', f);
+        write_nr_pdsch_stats_item(f, s);
+        first = 0;
+    }
+    fputs("]}", f);
+}
+
 static void write_lte_phy(FILE *f) {
     fputs("{\"pusch_tx_candidate\":", f);
     if (state.pusch.valid) {
@@ -1144,6 +1292,8 @@ static int write_snapshot(int is_running) {
     write_nr_serving(f);
     fputs(",\"layers\":", f);
     write_nr_layers(f);
+    fputs(",\"mac\":", f);
+    write_nr_mac(f);
     fputs(",\"ca\":{\"supported_combos\":", f);
     write_combo_state(f, &state.nr_combo);
     fputs("}},\"missing_metrics\":", f);
@@ -2143,6 +2293,183 @@ static int parse_nr_ml1_meas_database_update(uint16_t log_id, uint64_t qts, cons
     return 1;
 }
 
+static int parse_nr_mac_ul_tb_stats_candidate(uint16_t log_id, uint64_t qts, const uint8_t *b, size_t len) {
+    if (len < 20) return 0;
+    uint16_t minor = get16(b);
+    uint16_t major = get16(b + 2);
+    uint8_t count = b[15];
+    size_t rec_size;
+    if (major == 2 && minor == 0) rec_size = 92;
+    else if (major == 2 && minor == 1) rec_size = 96;
+    else return 0;
+    if (!count) count = (uint8_t)((len - 20) / rec_size);
+    if (len < 20 + (size_t)count * rec_size) return 0;
+
+    for (uint8_t i = 0; i < count; i++) {
+        const uint8_t *rec = b + 20 + (size_t)i * rec_size;
+        nr_mac_ul_tb_stats_t *s = &state.nr_ul_tb_stats;
+        memset(s, 0, sizeof(*s));
+        s->valid = 1;
+        s->major = major;
+        s->minor = minor;
+        s->record_index = i;
+        s->record_count = count;
+        s->tb_new_tx_bytes = get64(rec);
+        s->tb_retx_bytes = get64(rec + 8);
+        s->num_mcs = get64(rec + 16);
+        s->num_prb = get64(rec + 24);
+        s->phr = get64(rec + 32);
+        if (minor == 0) {
+            s->total_power = get32(rec + 40);
+            s->num_new_tx_tb = get32(rec + 44);
+            s->num_retx_tb = get32(rec + 48);
+            s->num_dtx = get32(rec + 52);
+            s->num_ri = get32(rec + 56);
+            s->ri = get32(rec + 60);
+            s->num_cqi = get32(rec + 64);
+            s->cqi = get32(rec + 68);
+            s->num_phr = get32(rec + 72);
+            s->tpc_accum = get32(rec + 76);
+            s->num_ulsch_sched = get32(rec + 80);
+            s->num_no_ulsch_sched = get32(rec + 84);
+            s->pcmax_raw = get16(rec + 88);
+            s->flush_gap_count = get16(rec + 90);
+        } else {
+            s->total_power = get64(rec + 40);
+            s->num_new_tx_tb = get32(rec + 48);
+            s->num_retx_tb = get32(rec + 52);
+            s->num_ri = get32(rec + 56);
+            s->ri = get32(rec + 60);
+            s->num_cqi = get32(rec + 64);
+            s->cqi = get32(rec + 68);
+            s->num_phr = get32(rec + 72);
+            s->tpc_accum = get32(rec + 76);
+            s->num_ulsch_sched = get32(rec + 80);
+            s->num_no_ulsch_sched = get32(rec + 84);
+            s->pcmax_raw = get16(rec + 88);
+            s->flush_gap_count = get16(rec + 90);
+        }
+        double tb_total = (double)s->num_new_tx_tb + (double)s->num_retx_tb;
+        double sched_total = (double)s->num_ulsch_sched + (double)s->num_no_ulsch_sched;
+        double mcs_den = tb_total > 0.0 ? tb_total : (double)s->num_ulsch_sched;
+        s->avg_mcs_candidate = div0((double)s->num_mcs, mcs_den);
+        s->avg_prb_candidate = div0((double)s->num_prb, mcs_den);
+        s->avg_phr_candidate = div0((double)s->phr, (double)s->num_phr);
+        s->avg_ri_candidate = div0((double)s->ri, (double)s->num_ri);
+        s->avg_cqi_candidate = div0((double)s->cqi, (double)s->num_cqi);
+        s->retx_tb_ratio = div0((double)s->num_retx_tb, tb_total);
+        s->ulsch_sched_ratio = div0((double)s->num_ulsch_sched, sched_total);
+        s->pcmax_dbm_candidate = (double)s->pcmax_raw / 10.0;
+        s->qts = qts;
+        s->updated_at = time(NULL);
+        sample_mac_seen = 1;
+        sample_nr_seen = 1;
+
+        if (opt_stream_json) {
+            json_prefix(log_id, qts, "NR", "nr_mac_ul_tb_stats");
+            printf(",\"confidence\":\"layout_v%u_%u_decoded\","
+                   "\"version\":\"%u.%u\",\"record_index\":%u,"
+                   "\"record_count\":%u,\"tb_new_tx_bytes\":%llu,"
+                   "\"tb_retx_bytes\":%llu,\"num_mcs\":%llu,"
+                   "\"avg_mcs_candidate\":%.2f,\"num_prb\":%llu,"
+                   "\"avg_prb_candidate\":%.2f,\"phr\":%llu,"
+                   "\"avg_phr_candidate\":%.2f,\"total_power\":%llu,"
+                   "\"num_new_tx_tb\":%u,\"num_retx_tb\":%u,"
+                   "\"retx_tb_ratio\":%.4f,\"num_dtx\":%u,"
+                   "\"num_ri\":%u,\"ri\":%u,\"avg_ri_candidate\":%.2f,"
+                   "\"num_cqi\":%u,\"cqi\":%u,\"avg_cqi_candidate\":%.2f,"
+                   "\"num_phr\":%u,\"tpc_accum\":%u,"
+                   "\"num_ulsch_sched\":%u,\"num_no_ulsch_sched\":%u,"
+                   "\"ulsch_sched_ratio\":%.4f,\"pcmax_raw\":%u,"
+                   "\"pcmax_dbm_candidate\":%.1f,\"flush_gap_count\":%u}\n",
+                   major, minor, major, minor, i, count,
+                   (unsigned long long)s->tb_new_tx_bytes,
+                   (unsigned long long)s->tb_retx_bytes,
+                   (unsigned long long)s->num_mcs, s->avg_mcs_candidate,
+                   (unsigned long long)s->num_prb, s->avg_prb_candidate,
+                   (unsigned long long)s->phr, s->avg_phr_candidate,
+                   (unsigned long long)s->total_power, s->num_new_tx_tb,
+                   s->num_retx_tb, s->retx_tb_ratio, s->num_dtx,
+                   s->num_ri, s->ri, s->avg_ri_candidate, s->num_cqi,
+                   s->cqi, s->avg_cqi_candidate, s->num_phr, s->tpc_accum,
+                   s->num_ulsch_sched, s->num_no_ulsch_sched,
+                   s->ulsch_sched_ratio, s->pcmax_raw,
+                   s->pcmax_dbm_candidate, s->flush_gap_count);
+        }
+    }
+    return 1;
+}
+
+static int parse_nr_mac_pdsch_stats_candidate(uint16_t log_id, uint64_t qts, const uint8_t *b, size_t len) {
+    if (len < 28) return 0;
+    uint16_t minor = get16(b);
+    uint16_t major = get16(b + 2);
+    if (!(major == 2 && minor == 2)) return 0;
+    uint8_t count = b[15];
+    const size_t rec_size = 72;
+    if (!count) count = (uint8_t)((len - 28) / rec_size);
+    if (len < 28 + (size_t)count * rec_size) return 0;
+
+    for (uint8_t i = 0; i < count; i++) {
+        const uint8_t *rec = b + 28 + (size_t)i * rec_size;
+        uint32_t carrier_id = get32(rec);
+        nr_mac_pdsch_stats_t *s = &state.nr_pdsch_stats[cc_slot((uint8_t)carrier_id)];
+        memset(s, 0, sizeof(*s));
+        s->valid = 1;
+        s->major = major;
+        s->minor = minor;
+        s->record_index = i;
+        s->record_count = count;
+        s->carrier_id = carrier_id;
+        s->num_slots_elapsed = get32(rec + 4);
+        s->num_pdsch_decode = get32(rec + 8);
+        s->num_crc_pass_tb = get32(rec + 12);
+        s->num_crc_fail_tb = get32(rec + 16);
+        s->num_retx = get32(rec + 20);
+        s->ack_as_nack = get32(rec + 24);
+        s->harq_failure = get32(rec + 28);
+        s->crc_pass_tb_bytes = get64(rec + 32);
+        s->crc_fail_tb_bytes = get64(rec + 40);
+        s->tb_bytes = get64(rec + 48);
+        s->padding_bytes = get64(rec + 56);
+        s->retx_bytes = get64(rec + 64);
+        double crc_total = (double)s->num_crc_pass_tb + (double)s->num_crc_fail_tb;
+        double byte_total = (double)s->crc_pass_tb_bytes + (double)s->crc_fail_tb_bytes;
+        s->dl_bler = div0((double)s->num_crc_fail_tb, crc_total);
+        s->byte_error_ratio = div0((double)s->crc_fail_tb_bytes, byte_total);
+        s->retx_ratio = div0((double)s->num_retx, (double)s->num_pdsch_decode);
+        s->qts = qts;
+        s->updated_at = time(NULL);
+        sample_mac_seen = 1;
+        sample_nr_seen = 1;
+
+        if (opt_stream_json) {
+            json_prefix(log_id, qts, "NR", "nr_mac_pdsch_stats");
+            printf(",\"confidence\":\"layout_v%u_%u_decoded\","
+                   "\"version\":\"%u.%u\",\"record_index\":%u,"
+                   "\"record_count\":%u,\"carrier_id\":%u,"
+                   "\"num_slots_elapsed\":%u,\"num_pdsch_decode\":%u,"
+                   "\"num_crc_pass_tb\":%u,\"num_crc_fail_tb\":%u,"
+                   "\"dl_bler\":%.4f,\"num_retx\":%u,"
+                   "\"retx_ratio\":%.4f,\"ack_as_nack\":%u,"
+                   "\"harq_failure\":%u,\"crc_pass_tb_bytes\":%llu,"
+                   "\"crc_fail_tb_bytes\":%llu,\"byte_error_ratio\":%.4f,"
+                   "\"tb_bytes\":%llu,\"padding_bytes\":%llu,"
+                   "\"retx_bytes\":%llu}\n",
+                   major, minor, major, minor, i, count, s->carrier_id,
+                   s->num_slots_elapsed, s->num_pdsch_decode,
+                   s->num_crc_pass_tb, s->num_crc_fail_tb, s->dl_bler,
+                   s->num_retx, s->retx_ratio, s->ack_as_nack,
+                   s->harq_failure, (unsigned long long)s->crc_pass_tb_bytes,
+                   (unsigned long long)s->crc_fail_tb_bytes,
+                   s->byte_error_ratio, (unsigned long long)s->tb_bytes,
+                   (unsigned long long)s->padding_bytes,
+                   (unsigned long long)s->retx_bytes);
+        }
+    }
+    return 1;
+}
+
 static void parse_log_body(uint16_t log_id, uint64_t qts, const uint8_t *body, size_t body_len) {
     int parsed = 0;
     if (log_id == LOG_LTE_SMEAS) parsed = parse_lte_smeas(log_id, qts, body, body_len);
@@ -2154,6 +2481,8 @@ static void parse_log_body(uint16_t log_id, uint64_t qts, const uint8_t *body, s
     else if (log_id == LOG_LTE_PHY_PUSCH_TX_REPORT) parsed = parse_lte_phy_pusch_tx_candidate(log_id, qts, body, body_len);
     else if (log_id == LOG_LTE_PHY_PDSCH_STAT_INDICATION2) parsed = parse_lte_phy_pdsch_stat_candidate(log_id, qts, body, body_len);
     else if (log_id == LOG_NR_ML1) parsed = parse_nr_ml1_meas_database_update(log_id, qts, body, body_len);
+    else if (log_id == LOG_NR_MAC_UL_TB_STATS) parsed = parse_nr_mac_ul_tb_stats_candidate(log_id, qts, body, body_len);
+    else if (log_id == LOG_NR_MAC_PDSCH_STATS) parsed = parse_nr_mac_pdsch_stats_candidate(log_id, qts, body, body_len);
     else if (log_id == LOG_LTE_CA) {
         got_lte = 1;
         write_combo(combo_dir, "b0cd_qlte.hex", body, body_len);

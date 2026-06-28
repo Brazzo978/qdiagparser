@@ -80,9 +80,9 @@ These log IDs are present in the local Qualcomm/QXDM golden logmask and are more
 - LTE `0xB173`: PDSCH stat indication candidate.
 - LTE `0xB174`: PUSCH stat indication candidate.
 - LTE `0xB175`..`0xB178`: legacy/raw candidates kept for vendor-mask drift.
-- NR `0xB881`: NR MAC UL TB stats candidate.
+- NR `0xB881`: NR MAC UL TB stats, decoded as aggregate UL stats for v2.0/v2.1.
 - NR `0xB883`: NR MAC UL physical channel schedule candidate.
-- NR `0xB888`: NR MAC PDSCH stats candidate.
+- NR `0xB888`: NR MAC PDSCH stats, decoded as aggregate DL BLER/reTx stats for v2.2.
 - NR `0xB975`: NR ML1 serving-cell beam-management candidate.
 
 ## Live PHY Probe On T99W175
@@ -138,6 +138,7 @@ Confirmed partial mapping:
 - `0xB139` now decodes v102/v144 plus the T99W175-observed v161 100-byte layout.
 - In each `0xB139` record, offset `+8` is exposed as `tb_size` and backward-compatible `grant`; it matched the decoded LTE MAC UL `grant` field in 153 out of 165 exact TTI-correlated records in the first load capture.
 - `0xB139` is now emitted as `lte_phy_pusch_tx_candidate` with TTI, carrier, RB start/count, TBS, coding rate, PUSCH modulation order, ACK/CQI/RI flags, RV/re-tx, and TX-power candidate. UL MCS is still not explicit in this layout.
+- Good-SIM live validation saw NR `0xB881:1355`, `0xB888:1354`, and `0xB883:573` in a 9 second bounded snapshot run. `0xB881` now populates `nr.mac.ul_tb_stats`; `0xB888` now populates `nr.mac.pdsch_stats_by_cc[]`. `0xB883` still needs bitfield promotion before exposing current-slot NR UL MCS/RB/modulation.
 
 Structured decoder smoke:
 

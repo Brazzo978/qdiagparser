@@ -187,6 +187,51 @@
       "rat": "NR",
       "ssb_periodicity": 0,
       "version": "2.7"
+    },
+    "mac": {
+      "ul_tb_stats": {
+        "avg_mcs_candidate": 19.47,
+        "avg_phr_candidate": 15.68,
+        "avg_prb_candidate": 5.72,
+        "confidence": "layout_v2_1_decoded",
+        "event": "nr_mac_ul_tb_stats",
+        "flush_gap_count": 0,
+        "log_id": "0xB881",
+        "num_new_tx_tb": 478,
+        "num_no_ulsch_sched": 0,
+        "num_prb": 2967,
+        "num_retx_tb": 41,
+        "num_ulsch_sched": 519,
+        "pcmax_dbm_candidate": 23.0,
+        "rat": "NR",
+        "retx_tb_ratio": 0.079,
+        "tb_new_tx_bytes": 157029,
+        "tb_retx_bytes": 11081,
+        "ulsch_sched_ratio": 1.0,
+        "version": "2.1"
+      },
+      "pdsch_stats_by_cc": [
+        {
+          "byte_error_ratio": 0.0,
+          "carrier_id": 0,
+          "confidence": "layout_v2_2_decoded",
+          "crc_fail_tb_bytes": 0,
+          "crc_pass_tb_bytes": 8186,
+          "dl_bler": 0.0,
+          "event": "nr_mac_pdsch_stats",
+          "harq_failure": 0,
+          "log_id": "0xB888",
+          "num_crc_fail_tb": 0,
+          "num_crc_pass_tb": 49,
+          "num_pdsch_decode": 49,
+          "num_retx": 0,
+          "padding_bytes": 4565,
+          "rat": "NR",
+          "retx_ratio": 0.0,
+          "tb_bytes": 8186,
+          "version": "2.2"
+        }
+      ]
     }
   },
   "warnings": []

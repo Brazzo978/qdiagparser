@@ -54,6 +54,10 @@ def snr_lte(raw: int) -> float:
     return round(raw * 0.1 - 20.0, 2)
 
 
+def ratio(num: float, den: float, digits: int = 4) -> float:
+    return round(num / den, digits) if den else 0.0
+
+
 def ts(pkt: DiagLogPacket) -> str:
     return pkt.timestamp.isoformat()
 
@@ -100,6 +104,8 @@ class MetricsParser:
             0xB822: self.nr_rrc_mib_info,
             0xB823: self.nr_rrc_serving_cell_info,
             0xB826: self.nr_ca_combos_raw,
+            0xB881: self.nr_mac_ul_tb_stats_candidate,
+            0xB888: self.nr_mac_pdsch_stats_candidate,
             0xB97F: self.nr_ml1_meas_database_update,
         }.get(pkt.log_id)
         if not parser:
@@ -735,6 +741,153 @@ class MetricsParser:
         if rel_maj != 0:
             event["nr_cgi"] = ncgi
         return event
+
+    def nr_mac_ul_tb_stats_candidate(self, pkt: DiagLogPacket) -> list[dict[str, Any]]:
+        body = pkt.body
+        if len(body) < 20:
+            return [warn(pkt, "short NR MAC UL TB stats body")]
+        minor, major = struct.unpack_from("<HH", body, 0)
+        if major == 2 and minor == 0:
+            record_size = 92
+        elif major == 2 and minor == 1:
+            record_size = 96
+        else:
+            return [warn(pkt, f"unknown NR MAC UL TB stats version {major}.{minor}")]
+        count = body[15] or (len(body) - 20) // record_size
+        if len(body) < 20 + count * record_size:
+            return [warn(pkt, f"unexpected NR MAC UL TB stats length {len(body)}")]
+        events = []
+        for index in range(count):
+            rec = body[20 + index * record_size:20 + (index + 1) * record_size]
+            tb_new_tx_bytes, tb_retx_bytes, num_mcs, num_prb, phr = struct.unpack_from("<QQQQQ", rec, 0)
+            if minor == 0:
+                total_power = struct.unpack_from("<I", rec, 40)[0]
+                (
+                    num_new_tx_tb,
+                    num_retx_tb,
+                    num_dtx,
+                    num_ri,
+                    ri,
+                    num_cqi,
+                    cqi,
+                    num_phr,
+                    tpc_accum,
+                    num_ulsch_sched,
+                    num_no_ulsch_sched,
+                    pcmax_raw,
+                    flush_gap_count,
+                ) = struct.unpack_from("<IIIIIIIIIIIHH", rec, 44)
+            else:
+                total_power = struct.unpack_from("<Q", rec, 40)[0]
+                (
+                    num_new_tx_tb,
+                    num_retx_tb,
+                    num_ri,
+                    ri,
+                    num_cqi,
+                    cqi,
+                    num_phr,
+                    tpc_accum,
+                    num_ulsch_sched,
+                    num_no_ulsch_sched,
+                    pcmax_raw,
+                    flush_gap_count,
+                ) = struct.unpack_from("<IIIIIIIIIIHH", rec, 48)
+                num_dtx = 0
+            tb_total = num_new_tx_tb + num_retx_tb
+            sched_total = num_ulsch_sched + num_no_ulsch_sched
+            avg_den = tb_total or num_ulsch_sched
+            event = base(pkt, "nr_mac_ul_tb_stats", "NR")
+            event.update({
+                "confidence": f"layout_v{major}_{minor}_decoded",
+                "version": f"{major}.{minor}",
+                "record_index": index,
+                "record_count": count,
+                "tb_new_tx_bytes": tb_new_tx_bytes,
+                "tb_retx_bytes": tb_retx_bytes,
+                "num_mcs": num_mcs,
+                "avg_mcs_candidate": ratio(num_mcs, avg_den, 2),
+                "num_prb": num_prb,
+                "avg_prb_candidate": ratio(num_prb, avg_den, 2),
+                "phr": phr,
+                "avg_phr_candidate": ratio(phr, num_phr, 2),
+                "total_power": total_power,
+                "num_new_tx_tb": num_new_tx_tb,
+                "num_retx_tb": num_retx_tb,
+                "retx_tb_ratio": ratio(num_retx_tb, tb_total),
+                "num_dtx": num_dtx,
+                "num_ri": num_ri,
+                "ri": ri,
+                "avg_ri_candidate": ratio(ri, num_ri, 2),
+                "num_cqi": num_cqi,
+                "cqi": cqi,
+                "avg_cqi_candidate": ratio(cqi, num_cqi, 2),
+                "num_phr": num_phr,
+                "tpc_accum": tpc_accum,
+                "num_ulsch_sched": num_ulsch_sched,
+                "num_no_ulsch_sched": num_no_ulsch_sched,
+                "ulsch_sched_ratio": ratio(num_ulsch_sched, sched_total),
+                "pcmax_raw": pcmax_raw,
+                "pcmax_dbm_candidate": round(pcmax_raw / 10.0, 1),
+                "flush_gap_count": flush_gap_count,
+            })
+            events.append(event)
+        return events
+
+    def nr_mac_pdsch_stats_candidate(self, pkt: DiagLogPacket) -> list[dict[str, Any]]:
+        body = pkt.body
+        if len(body) < 28:
+            return [warn(pkt, "short NR MAC PDSCH stats body")]
+        minor, major = struct.unpack_from("<HH", body, 0)
+        if not (major == 2 and minor == 2):
+            return [warn(pkt, f"unknown NR MAC PDSCH stats version {major}.{minor}")]
+        record_size = 72
+        count = body[15] or (len(body) - 28) // record_size
+        if len(body) < 28 + count * record_size:
+            return [warn(pkt, f"unexpected NR MAC PDSCH stats length {len(body)}")]
+        events = []
+        for index in range(count):
+            rec = body[28 + index * record_size:28 + (index + 1) * record_size]
+            (
+                carrier_id,
+                num_slots_elapsed,
+                num_pdsch_decode,
+                num_crc_pass_tb,
+                num_crc_fail_tb,
+                num_retx,
+                ack_as_nack,
+                harq_failure,
+                crc_pass_tb_bytes,
+                crc_fail_tb_bytes,
+                tb_bytes,
+                padding_bytes,
+                retx_bytes,
+            ) = struct.unpack_from("<IIIIIIIIQQQQQ", rec, 0)
+            event = base(pkt, "nr_mac_pdsch_stats", "NR")
+            event.update({
+                "confidence": f"layout_v{major}_{minor}_decoded",
+                "version": f"{major}.{minor}",
+                "record_index": index,
+                "record_count": count,
+                "carrier_id": carrier_id,
+                "num_slots_elapsed": num_slots_elapsed,
+                "num_pdsch_decode": num_pdsch_decode,
+                "num_crc_pass_tb": num_crc_pass_tb,
+                "num_crc_fail_tb": num_crc_fail_tb,
+                "dl_bler": ratio(num_crc_fail_tb, num_crc_pass_tb + num_crc_fail_tb),
+                "num_retx": num_retx,
+                "retx_ratio": ratio(num_retx, num_pdsch_decode),
+                "ack_as_nack": ack_as_nack,
+                "harq_failure": harq_failure,
+                "crc_pass_tb_bytes": crc_pass_tb_bytes,
+                "crc_fail_tb_bytes": crc_fail_tb_bytes,
+                "byte_error_ratio": ratio(crc_fail_tb_bytes, crc_pass_tb_bytes + crc_fail_tb_bytes),
+                "tb_bytes": tb_bytes,
+                "padding_bytes": padding_bytes,
+                "retx_bytes": retx_bytes,
+            })
+            events.append(event)
+        return events
 
     def nr_ml1_meas_database_update(self, pkt: DiagLogPacket) -> dict[str, Any]:
         body = pkt.body
